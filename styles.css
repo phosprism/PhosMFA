@@ -1238,3 +1238,98 @@ button:disabled {
   gap: 8px 12px;
   margin-top: 10px;
 }
+
+/* --- パソコン用のパスコード入力 (キーボードで入力) --- */
+
+.pin-desktop {
+  gap: 14px;
+}
+
+.pin-field {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  position: relative;
+}
+
+.pin-box {
+  align-items: center;
+  background: #fff;
+  border: 1.5px solid #c8d2df;
+  border-radius: 10px;
+  display: flex;
+  height: 58px;
+  justify-content: center;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  width: 48px;
+}
+
+.pin-box.filled::after {
+  background: #19345c;
+  border-radius: 50%;
+  content: "";
+  height: 12px;
+  width: 12px;
+}
+
+.pin-desktop.focused .pin-box.current {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(18, 100, 216, 0.15);
+}
+
+/* 入力位置を示す点滅する縦線 */
+.pin-desktop.focused .pin-box.current:not(.filled)::after {
+  animation: pin-caret 1s steps(1) infinite;
+  background: var(--accent);
+  content: "";
+  height: 24px;
+  width: 2px;
+}
+
+@keyframes pin-caret {
+  50% { opacity: 0; }
+}
+
+.pin-input {
+  background: transparent;
+  border: 0;
+  caret-color: transparent;
+  color: transparent;
+  cursor: text;
+  font-size: 16px;
+  height: 100%;
+  inset: 0;
+  opacity: 0;
+  padding: 0;
+  position: absolute;
+  width: 100%;
+}
+
+.pin-input:focus {
+  box-shadow: none;
+}
+
+.pin-help {
+  text-align: center;
+}
+
+.pin-actions {
+  display: grid;
+  gap: 8px;
+  width: min(100%, 320px);
+}
+
+.pin.shake .pin-field {
+  animation: pin-shake 0.42s ease;
+}
+
+.pin.shake .pin-box {
+  border-color: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pin.shake .pin-field,
+  .pin-desktop.focused .pin-box.current:not(.filled)::after {
+    animation: none;
+  }
+}

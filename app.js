@@ -7,7 +7,7 @@ const CACHE_KEY_ID = "account-cache-key-v1";
 const CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v2");
 const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
 const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
-const SERVICE_WORKER_CACHE = "phos-mfa-v16";
+const SERVICE_WORKER_CACHE = "phos-mfa-v17";
 // 開いたときのロックが有効な人のオフライン用キャッシュ (v3)。サーバーからもらう鍵 K で暗号化し、
 // K はパスコードから PBKDF2 で作った鍵で包んで保存する。パスコードを知らないと開けない。
 const OFFLINE_WRAP_KEY = "phos-mfa.offline-wrap.v1";
@@ -1181,7 +1181,7 @@ function renderVerifyStage(security) {
     unlocking ? "パスコードを入力" : "2段階認証",
     unlocking
       ? canUsePasskey
-        ? "パスコードを入力するか、「パスキー」で本人確認をしてください。"
+        ? "パスコードを入力するか、パスキーで本人確認をしてください。"
         : "パスコードを入力すると、認証コードを表示します。"
       : "Discord でのログインを確認しました。続けて、パスコードかパスキーで本人確認をしてください。",
   );
@@ -1297,11 +1297,161 @@ function divider(text) {
   return element;
 }
 
-// スマホのロック画面のようなパスコード入力 (ドット + 数字キー)。
-// length が null のときは 4〜6桁で、「確定」キーで送る。
+// パスコード入力。スマホ・タブレットはロック画面のような数字キー、
+// パソコン (マウスやトラックパッドで操作する端末) はキーボードで打つ入力欄にする。
+// length が null のときは 4〜6桁で、「確定」で送る。
 let activePad = null;
 
-function passcodePad({ length, onComplete, extraKey = null }) {
+function usesKeyboardEntry() {
+  return window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+}
+
+function passcodePad(options) {
+  return usesKeyboardEntry() ? passcodeField(options) : passcodeKeypad(options);
+}
+
+// パソコン用: 桁数分の枠に、キーボードで入力する。
+// 実際の入力は見えない input で受けるので、日本語入力がオンでも、貼り付けでも入力できる。
+function passcodeField({ length, onComplete, extraKey = null }) {
+  destroyActivePad();
+  const maxLength = length || 6;
+  let value = "";
+  let busy = false;
+
+  const element = document.createElement("div");
+  element.className = "pin pin-desktop";
+
+  const field = document.createElement("div");
+  field.className = "pin-field";
+  const boxes = [];
+  for (let i = 0; i < maxLength; i += 1) {
+    const box = document.createElement("span");
+    box.className = "pin-box";
+    box.setAttribute("aria-hidden", "true");
+    boxes.push(box);
+    field.append(box);
+  }
+
+  const input = document.createElement("input");
+  input.className = "pin-input";
+  input.type = "password";
+  input.inputMode = "numeric";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.maxLength = maxLength;
+  input.setAttribute("aria-label", length ? `パスコード（${length}桁）` : "パスコード（4〜6桁）");
+  field.append(input);
+
+  const help = hint(length ? "キーボードで数字を入力してください。" : "キーボードで数字を入力し、Enter キーで確定してください。");
+  help.classList.add("pin-help");
+
+  const actions = document.createElement("div");
+  actions.className = "pin-actions";
+  let okButton = null;
+  if (!length) {
+    okButton = button("確定", "button");
+    okButton.addEventListener("click", submit);
+    actions.append(okButton);
+  }
+  let extraButton = null;
+  if (extraKey) {
+    extraButton = button(extraKey.ariaLabel || extraKey.label, "button", "secondary");
+    extraButton.addEventListener("click", async () => {
+      if (busy) return;
+      setBusy(true);
+      try {
+        await extraKey.onPress();
+      } finally {
+        setBusy(false);
+        focusInput();
+      }
+    });
+    actions.append(extraButton);
+  }
+
+  element.append(field, help);
+  if (actions.childElementCount) element.append(actions);
+  field.addEventListener("animationend", () => element.classList.remove("shake"));
+  field.addEventListener("mousedown", (event) => {
+    if (event.target !== input) {
+      event.preventDefault();
+      focusInput();
+    }
+  });
+
+  function normalize(text) {
+    // 全角数字も受け付ける
+    return text.replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0)).replace(/\D/g, "").slice(0, maxLength);
+  }
+
+  function render() {
+    boxes.forEach((box, i) => {
+      box.classList.toggle("filled", i < value.length);
+      box.classList.toggle("current", i === Math.min(value.length, maxLength - 1) && !busy);
+    });
+    if (okButton) okButton.disabled = busy || value.length < 4;
+  }
+
+  function setBusy(next) {
+    busy = next;
+    element.classList.toggle("busy", next);
+    input.disabled = next;
+    for (const control of actions.querySelectorAll("button")) control.disabled = next;
+    render();
+  }
+
+  function focusInput() {
+    if (!input.disabled && document.contains(input)) input.focus({ preventScroll: true });
+  }
+
+  input.addEventListener("input", () => {
+    value = normalize(input.value);
+    if (input.value !== value) input.value = value;
+    render();
+    if (length && value.length === length) submit();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    }
+  });
+  input.addEventListener("focus", () => element.classList.add("focused"));
+  input.addEventListener("blur", () => element.classList.remove("focused"));
+
+  async function submit() {
+    if (busy || value.length < 4) return;
+    const code = value;
+    setBusy(true);
+    let ok = false;
+    try {
+      ok = await onComplete(code);
+    } catch (error) {
+      setGateError("通信できませんでした。接続を確認して、もう一度お試しください。");
+    }
+    if (activePad !== controller) return;
+    setBusy(false);
+    if (!ok) {
+      value = "";
+      input.value = "";
+      render();
+      element.classList.remove("shake");
+      void element.offsetWidth;
+      element.classList.add("shake");
+    }
+    focusInput();
+  }
+
+  const controller = { element, destroy() {} };
+  activePad = controller;
+  render();
+  // 画面に入ったらすぐ打てるようにする
+  window.requestAnimationFrame(focusInput);
+  return controller;
+}
+
+// スマホ・タブレット用: ロック画面のような数字キー
+function passcodeKeypad({ length, onComplete, extraKey = null }) {
   destroyActivePad();
   const maxLength = length || 6;
   let value = "";

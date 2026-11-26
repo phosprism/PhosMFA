@@ -1,4 +1,4 @@
-const CACHE_NAME = "phos-mfa-v16";
+const CACHE_NAME = "phos-mfa-v17";
 const APP_SHELL = [
   "/index.html",
   "/styles.css",
