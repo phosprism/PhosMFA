@@ -25,3 +25,28 @@ npm-debug.log*
 *.db
 *.db-shm
 *.db-wal
+
+# Secrets / credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.secret
+secrets/
+credentials*.json
+service-account*.json
+
+# Database exports / backups (may contain encrypted TOTP seeds)
+backups/
+*.dump
+d1-export*.sql
+*-backup.sql
+
+# OS / editor
+.DS_Store
+
+# Claude Code (local only)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
