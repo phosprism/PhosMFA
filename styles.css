@@ -489,3 +489,51 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+select {
+  background: #fff;
+  border: 1px solid #c8d2df;
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  outline: 0;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(18, 100, 216, 0.15);
+}
+
+.otp-options {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.otp-options summary {
+  color: #344054;
+  cursor: pointer;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.otp-options-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 12px;
+}
+
+.otp-options-note {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 10px 0 0;
+}
+
+@media (max-width: 520px) {
+  .otp-options-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,5 +1,13 @@
-const ACCOUNT_CACHE_KEY = "dreamy-mfa.accounts.v1";
-const SERVICE_WORKER_CACHE = "dreamy-mfa-v8";
+// オフライン用キャッシュは暗号化して保存する (v2)。v1 以前は平文だったので読み込み時に移行して消す。
+const ACCOUNT_CACHE_KEY = "phos-mfa.accounts.v2";
+const LEGACY_PLAINTEXT_CACHE_KEYS = ["phos-mfa.accounts.v1", "dreamy-mfa.accounts.v1"];
+const CACHE_KEY_DB = "phos-mfa-keys";
+const CACHE_KEY_STORE = "keys";
+const CACHE_KEY_ID = "account-cache-key-v1";
+const CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v2");
+const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
+const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
+const SERVICE_WORKER_CACHE = "phos-mfa-v12";
 
 const state = {
   accounts: [],
@@ -30,6 +38,10 @@ const els = {
   selectedService: document.querySelector("#selectedService"),
   selectedAccount: document.querySelector("#selectedAccount"),
   tokenText: document.querySelector("#tokenText"),
+  tokenPeriodHint: document.querySelector("#tokenPeriodHint"),
+  selectedAlgorithm: document.querySelector("#selectedAlgorithm"),
+  selectedDigits: document.querySelector("#selectedDigits"),
+  selectedPeriod: document.querySelector("#selectedPeriod"),
   copyTokenButton: document.querySelector("#copyTokenButton"),
   deleteButton: document.querySelector("#deleteButton"),
   timeLeft: document.querySelector("#timeLeft"),
@@ -40,6 +52,10 @@ const els = {
   accountInput: document.querySelector("#accountInput"),
   roleInput: document.querySelector("#roleInput"),
   secretInput: document.querySelector("#secretInput"),
+  otpOptions: document.querySelector("#otpOptions"),
+  algorithmInput: document.querySelector("#algorithmInput"),
+  digitsInput: document.querySelector("#digitsInput"),
+  periodInput: document.querySelector("#periodInput"),
   addPanel: document.querySelector("#addPanel"),
   qrFileInput: document.querySelector("#qrFileInput"),
   qrFileButton: document.querySelector("#qrFileButton"),
@@ -55,9 +71,9 @@ const els = {
 registerServiceWorker();
 init();
 
-els.lockButton.addEventListener("click", () => {
+els.lockButton.addEventListener("click", async () => {
   stopQrCamera();
-  localStorage.removeItem(ACCOUNT_CACHE_KEY);
+  await clearAccountCache();
   location.href = "/logout";
 });
 
@@ -77,6 +93,9 @@ els.secretForm.addEventListener("submit", async (event) => {
     account: els.accountInput.value.trim(),
     role: els.roleInput.value.trim(),
     secret: els.secretInput.value.trim(),
+    algorithm: els.algorithmInput.value,
+    digits: Number(els.digitsInput.value),
+    period: Number(els.periodInput.value),
   };
 
   if (!payload.service || !payload.account || !payload.secret) {
@@ -96,11 +115,21 @@ els.secretForm.addEventListener("submit", async (event) => {
   }
 
   els.secretForm.reset();
+  els.otpOptions.open = false;
   setQrStatus("保存しました。");
   await loadAccounts({ showError: true });
 });
 
 els.searchInput.addEventListener("input", renderAccounts);
+els.secretInput.addEventListener("input", () => {
+  const value = els.secretInput.value.trim();
+  if (!value.startsWith("otpauth://")) return;
+  try {
+    applyOtpParamsToForm(parseOtpAuth(value));
+  } catch (error) {
+    setQrStatus(error.message);
+  }
+});
 els.qrFileButton.addEventListener("click", () => els.qrFileInput.click());
 els.qrFileInput.addEventListener("change", handleQrFile);
 els.qrCameraButton.addEventListener("click", startQrCamera);
@@ -108,7 +137,7 @@ els.qrStopButton.addEventListener("click", stopQrCamera);
 
 els.copyTokenButton.addEventListener("click", async () => {
   const token = currentAccount()?.token || "";
-  if (!/^\d{6}$/.test(token)) return;
+  if (!/^\d{6,8}$/.test(token)) return;
   await navigator.clipboard.writeText(token);
   els.copyTokenButton.querySelector("small").textContent = "コピーしました";
   window.setTimeout(() => {
@@ -185,8 +214,7 @@ async function loadAccounts({ showError = false } = {}) {
     state.offlineMode = false;
     state.lastSyncAt = Date.now();
     state.accounts = await hydrateAccounts(data.accounts || []);
-    cacheAccounts(state.accounts);
-    await prepareOfflineApp();
+    await cacheAccounts(state.accounts);
 
     if (!state.accounts.some((account) => account.id === state.selectedId)) {
       state.selectedId = state.accounts[0]?.id || "";
@@ -194,6 +222,8 @@ async function loadAccounts({ showError = false } = {}) {
 
     updatePermissionUi();
     renderAccounts();
+    // Service Worker が使えない環境では ready が解決しないので、表示を待たせない
+    prepareOfflineApp();
   } catch (error) {
     const restored = shouldUseOfflineFallback() ? await enableOfflineFromCache() : false;
     if (!restored && showError) {
@@ -209,14 +239,18 @@ async function loadAccounts({ showError = false } = {}) {
 async function hydrateAccounts(accounts) {
   const now = syncedNow();
   return Promise.all(
-    accounts.map(async (account) => ({
-      id: account.id,
-      service: account.service,
-      account: account.account,
-      role: account.role || "未分類",
-      secret: account.secret,
-      token: account.secret ? await generateTotp(account.secret, now) : account.token,
-    })),
+    accounts.map(async (account) => {
+      const otp = normalizeOtpParams(account);
+      return {
+        id: account.id,
+        service: account.service,
+        account: account.account,
+        role: account.role || "未分類",
+        secret: account.secret,
+        ...otp,
+        token: account.secret ? await generateTotp(account.secret, now, otp) : account.token,
+      };
+    }),
   );
 }
 
@@ -257,16 +291,21 @@ function renderSelection() {
   els.selectedService.textContent = account.service;
   els.selectedAccount.textContent = account.account;
   els.tokenText.textContent = formatTokenForDisplay(account.token);
+  els.selectedAlgorithm.textContent = `OATH-TOTP / ${OTP_HASHES[account.algorithm] || "SHA-1"}`;
+  els.selectedDigits.textContent = `${account.digits}桁`;
+  els.selectedPeriod.textContent = `${account.period}秒`;
+  els.tokenPeriodHint.textContent = String(account.period);
 }
 
 async function tick() {
   const now = syncedNow();
   const seconds = Math.floor(now / 1000);
-  const remaining = 30 - (seconds % 30);
+  const period = currentAccount()?.period || OTP_DEFAULTS.period;
+  const remaining = period - (seconds % period);
 
   els.timeLeft.textContent = String(remaining).padStart(2, "0");
   if (els.currentTime) els.currentTime.textContent = formatTime(now);
-  els.progressBar.style.width = `${(remaining / 30) * 100}%`;
+  els.progressBar.style.width = `${(remaining / period) * 100}%`;
   updateSyncStatus();
 
   await refreshTokens(now);
@@ -279,12 +318,12 @@ async function tick() {
 
 async function refreshTokens(now) {
   for (const account of state.accounts) {
-    if (account.secret) account.token = await generateTotp(account.secret, now);
+    if (account.secret) account.token = await generateTotp(account.secret, now, account);
   }
 }
 
 async function enableOfflineFromCache() {
-  const cached = loadCachedAccounts();
+  const cached = await loadCachedAccounts();
   if (!cached.length) return false;
 
   state.accounts = await hydrateAccounts(cached);
@@ -302,24 +341,151 @@ async function enableOfflineFromCache() {
   return true;
 }
 
-function cacheAccounts(accounts) {
-  const payload = accounts.map(({ id, service, account, role, secret }) => ({
+// オフライン用キャッシュ。シードは AES-256-GCM で暗号化して localStorage に置く。
+// 鍵は取り出し不可 (extractable: false) の CryptoKey として IndexedDB に保存するので、
+// localStorage やディスク上のデータをコピーされても、このブラウザ外では復号できない。
+async function cacheAccounts(accounts) {
+  const payload = accounts.map(({ id, service, account, role, secret, algorithm, digits, period }) => ({
     id,
     service,
     account,
     role,
     secret,
+    algorithm,
+    digits,
+    period,
   }));
-  localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(payload));
+
+  try {
+    const key = await getCacheKey({ create: true });
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: CACHE_AAD },
+      key,
+      new TextEncoder().encode(JSON.stringify(payload)),
+    );
+    localStorage.setItem(
+      ACCOUNT_CACHE_KEY,
+      JSON.stringify({ v: 2, iv: bytesToBase64(iv), data: bytesToBase64(new Uint8Array(ciphertext)) }),
+    );
+  } catch (error) {
+    // 暗号化できない環境 (IndexedDB が使えない等) では平文で残さず、オフライン機能を諦める。
+    localStorage.removeItem(ACCOUNT_CACHE_KEY);
+  }
+  removeLegacyPlaintextCache();
 }
 
-function loadCachedAccounts() {
+async function loadCachedAccounts() {
+  const legacy = readLegacyPlaintextCache();
+  if (legacy) {
+    removeLegacyPlaintextCache();
+    if (legacy.length) await cacheAccounts(legacy);
+    return legacy;
+  }
+
   try {
-    const parsed = JSON.parse(localStorage.getItem(ACCOUNT_CACHE_KEY) || "[]");
+    const stored = JSON.parse(localStorage.getItem(ACCOUNT_CACHE_KEY) || "null");
+    if (!stored || stored.v !== 2) return [];
+    const key = await getCacheKey({ create: false });
+    if (!key) throw new Error("cache key missing");
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64ToBytes(stored.iv), additionalData: CACHE_AAD },
+      key,
+      base64ToBytes(stored.data),
+    );
+    const parsed = JSON.parse(new TextDecoder().decode(plain));
     return Array.isArray(parsed) ? parsed.filter((account) => account.secret) : [];
   } catch (error) {
+    localStorage.removeItem(ACCOUNT_CACHE_KEY);
     return [];
   }
+}
+
+function readLegacyPlaintextCache() {
+  for (const name of LEGACY_PLAINTEXT_CACHE_KEYS) {
+    const raw = localStorage.getItem(name);
+    if (raw === null) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((account) => account.secret);
+    } catch (error) {
+      // 壊れたデータは捨てる
+    }
+  }
+  return null;
+}
+
+function removeLegacyPlaintextCache() {
+  for (const name of LEGACY_PLAINTEXT_CACHE_KEYS) localStorage.removeItem(name);
+}
+
+async function clearAccountCache() {
+  localStorage.removeItem(ACCOUNT_CACHE_KEY);
+  removeLegacyPlaintextCache();
+  cacheKeyPromise = null;
+  try {
+    await withKeyStore("readwrite", (store) => store.delete(CACHE_KEY_ID));
+  } catch (error) {
+    // 鍵の削除に失敗しても暗号文は消えているので続行
+  }
+}
+
+let cacheKeyPromise = null;
+
+function getCacheKey({ create }) {
+  if (!cacheKeyPromise) {
+    cacheKeyPromise = (async () => {
+      const existing = await withKeyStore("readonly", (store) => store.get(CACHE_KEY_ID));
+      if (existing) return existing;
+      if (!create) return null;
+      const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+      await withKeyStore("readwrite", (store) => store.put(key, CACHE_KEY_ID));
+      return key;
+    })().catch((error) => {
+      cacheKeyPromise = null;
+      throw error;
+    });
+  }
+  return cacheKeyPromise.then((key) => {
+    if (!key) cacheKeyPromise = null;
+    if (!key && create) return getCacheKey({ create });
+    return key;
+  });
+}
+
+function withKeyStore(mode, action) {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("IndexedDB is not available."));
+      return;
+    }
+    const open = indexedDB.open(CACHE_KEY_DB, 1);
+    open.onupgradeneeded = () => open.result.createObjectStore(CACHE_KEY_STORE);
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      const tx = db.transaction(CACHE_KEY_STORE, mode);
+      const request = action(tx.objectStore(CACHE_KEY_STORE));
+      tx.oncomplete = () => {
+        db.close();
+        resolve(request.result);
+      };
+      tx.onerror = tx.onabort = () => {
+        db.close();
+        reject(tx.error);
+      };
+    };
+  });
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
 }
 
 function updatePermissionUi() {
@@ -492,6 +658,7 @@ function applyQrResult(value) {
   }
 
   els.secretInput.value = value;
+  applyOtpParamsToForm(parsed);
   els.serviceInput.value = parsed.issuer || els.serviceInput.value || "X";
   els.accountInput.value = parsed.account || els.accountInput.value;
   els.roleInput.value = els.roleInput.value || "SNS";
@@ -500,20 +667,52 @@ function applyQrResult(value) {
 
 function parseOtpAuth(value) {
   if (!value.startsWith("otpauth://")) {
-    return { secret: value.trim(), issuer: "", account: "" };
+    return { secret: value.trim(), issuer: "", account: "", ...OTP_DEFAULTS };
   }
 
   const url = new URL(value);
+  if (url.hostname.toLowerCase() !== "totp") {
+    throw new Error("時間ベース (TOTP) のQRコードのみ対応しています。");
+  }
   const label = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
   const [labelIssuer, ...accountParts] = label.split(":");
   const issuer = url.searchParams.get("issuer") || (accountParts.length ? labelIssuer : "");
   const account = accountParts.length ? accountParts.join(":") : labelIssuer;
 
+  const otp = normalizeOtpParams({
+    algorithm: url.searchParams.get("algorithm"),
+    digits: url.searchParams.get("digits"),
+    period: url.searchParams.get("period"),
+  });
+  const requestedAlgorithm = (url.searchParams.get("algorithm") || "").toUpperCase().replace(/-/g, "");
+  if (requestedAlgorithm && requestedAlgorithm !== otp.algorithm) {
+    throw new Error(`未対応のアルゴリズムです: ${url.searchParams.get("algorithm")}`);
+  }
+  if (url.searchParams.get("digits") && String(otp.digits) !== url.searchParams.get("digits")) {
+    throw new Error(`未対応の桁数です: ${url.searchParams.get("digits")}`);
+  }
+  if (url.searchParams.get("period") && String(otp.period) !== url.searchParams.get("period")) {
+    throw new Error(`未対応の更新間隔です: ${url.searchParams.get("period")}`);
+  }
+
   return {
     secret: url.searchParams.get("secret") || "",
     issuer,
     account,
+    ...otp,
   };
+}
+
+function applyOtpParamsToForm({ algorithm, digits, period }) {
+  els.algorithmInput.value = algorithm;
+  els.digitsInput.value = String(digits);
+  if (![...els.periodInput.options].some((option) => option.value === String(period))) {
+    els.periodInput.append(new Option(`${period}秒`, String(period)));
+  }
+  els.periodInput.value = String(period);
+  const isDefault =
+    algorithm === OTP_DEFAULTS.algorithm && digits === OTP_DEFAULTS.digits && period === OTP_DEFAULTS.period;
+  if (!isDefault) els.otpOptions.open = true;
 }
 
 function loadImage(file) {
@@ -556,8 +755,7 @@ function forceLogout() {
   state.accessRevoked = true;
   state.offlineMode = false;
   state.accounts = [];
-  localStorage.removeItem(ACCOUNT_CACHE_KEY);
-  location.replace("/login");
+  clearAccountCache().finally(() => location.replace("/login"));
 }
 
 function shouldUseOfflineFallback() {
@@ -569,20 +767,36 @@ function currentAccount() {
 }
 
 function formatTokenForDisplay(token) {
-  return /^\d{6}$/.test(token || "") ? `${token.slice(0, 3)} ${token.slice(3)}` : "------";
+  if (!/^\d{6,8}$/.test(token || "")) return "------";
+  const split = token.length === 6 ? 3 : token.length - 4;
+  return `${token.slice(0, split)} ${token.slice(split)}`;
 }
 
-async function generateTotp(secret, timestamp) {
+function normalizeOtpParams(raw = {}) {
+  const algorithm = String(raw.algorithm ?? "").trim().toUpperCase().replace(/-/g, "");
+  const digits = Number(raw.digits);
+  const period = Number(raw.period);
+  return {
+    algorithm: algorithm in OTP_HASHES ? algorithm : OTP_DEFAULTS.algorithm,
+    digits: Number.isInteger(digits) && digits >= 6 && digits <= 8 ? digits : OTP_DEFAULTS.digits,
+    period: Number.isInteger(period) && period >= 10 && period <= 300 ? period : OTP_DEFAULTS.period,
+  };
+}
+
+async function generateTotp(secret, timestamp, params = OTP_DEFAULTS) {
+  const { algorithm, digits, period } = normalizeOtpParams(params);
   const key = await crypto.subtle.importKey(
     "raw",
     base32ToBytes(secret),
-    { name: "HMAC", hash: "SHA-1" },
+    { name: "HMAC", hash: OTP_HASHES[algorithm] },
     false,
     ["sign"],
   );
-  const counter = Math.floor(timestamp / 1000 / 30);
+  const counter = Math.floor(timestamp / 1000 / period);
   const buffer = new ArrayBuffer(8);
-  new DataView(buffer).setUint32(4, counter);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.floor(counter / 0x100000000));
+  view.setUint32(4, counter >>> 0);
   const hash = new Uint8Array(await crypto.subtle.sign("HMAC", key, buffer));
   const offset = hash[hash.length - 1] & 0x0f;
   const binary =
@@ -590,7 +804,7 @@ async function generateTotp(secret, timestamp) {
     (hash[offset + 1] << 16) |
     (hash[offset + 2] << 8) |
     hash[offset + 3];
-  return String(binary % 1_000_000).padStart(6, "0");
+  return String(binary % 10 ** digits).padStart(digits, "0");
 }
 
 function base32ToBytes(secret) {

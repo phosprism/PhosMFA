@@ -1,4 +1,4 @@
-# Dreamy MFA
+# PhosMFA
 
 Discord認証で保護された共有TOTP認証コード管理アプリです。Cloudflare Workers上で動作し、Cloudflare D1に保存したTOTPシードを使って、複数人で共有アカウントの二段階認証コードを確認できます。
 

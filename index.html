@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#0f1b31">
-    <title>Dreamy MFA</title>
+    <title>PhosMFA</title>
     <link rel="shortcut icon" href="icons/favicon.png" type="image/x-icon">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -13,8 +13,8 @@
   <body>
     <header class="topbar">
       <div>
-        <p class="eyebrow">Dreamy MFA</p>
-        <h1>Dreamy MFA</h1>
+        <p class="eyebrow">PhosMFA</p>
+        <h1>PhosMFA</h1>
       </div>
       <div class="clock" aria-live="polite">
         <span id="timeLeft">--</span>
@@ -47,7 +47,7 @@
         <section class="detail" id="detailPanel">
           <div class="empty-state" id="emptyState">
             <h2>アカウントを選択</h2>
-            <p>左の一覧からサービスを選ぶと、30秒ごとに更新される認証コードを表示します。</p>
+            <p>左の一覧からサービスを選ぶと、定期的に更新される認証コードを表示します。</p>
           </div>
 
           <article class="token-view hidden" id="tokenView">
@@ -74,21 +74,21 @@
               <div id="progressBar"></div>
             </div>
             <p class="token-hint" id="tokenHint">
-              トークンは30秒ごとに更新されるため、残り時間を見計らってコピペしてください。
+              トークンは<span id="tokenPeriodHint">30</span>秒ごとに更新されるため、残り時間を見計らってコピペしてください。
             </p>
 
             <dl class="facts">
               <div>
                 <dt>方式</dt>
-                <dd>OATH-TOTP / SHA-1</dd>
+                <dd id="selectedAlgorithm">OATH-TOTP / SHA-1</dd>
               </div>
               <div>
                 <dt>桁数</dt>
-                <dd>6桁</dd>
+                <dd id="selectedDigits">6桁</dd>
               </div>
               <div>
                 <dt>周期</dt>
-                <dd>30秒</dd>
+                <dd id="selectedPeriod">30秒</dd>
               </div>
             </dl>
           </article>
@@ -127,6 +127,35 @@
               <span>シードまたは otpauth URI</span>
               <textarea id="secretInput" rows="4" spellcheck="false" placeholder="QRコードを読み取るか、表示されたシードを貼り付け"></textarea>
             </label>
+            <details id="otpOptions" class="otp-options">
+              <summary>詳細設定（通常は変更不要）</summary>
+              <div class="otp-options-grid">
+                <label>
+                  <span>アルゴリズム</span>
+                  <select id="algorithmInput">
+                    <option value="SHA1" selected>SHA-1</option>
+                    <option value="SHA256">SHA-256</option>
+                    <option value="SHA512">SHA-512</option>
+                  </select>
+                </label>
+                <label>
+                  <span>桁数</span>
+                  <select id="digitsInput">
+                    <option value="6" selected>6桁</option>
+                    <option value="7">7桁</option>
+                    <option value="8">8桁</option>
+                  </select>
+                </label>
+                <label>
+                  <span>更新間隔</span>
+                  <select id="periodInput">
+                    <option value="30" selected>30秒</option>
+                    <option value="60">60秒</option>
+                  </select>
+                </label>
+              </div>
+              <p class="otp-options-note">サービス側の指定に合わせてください。QRコードを読み取ると自動で設定されます。</p>
+            </details>
             <button type="submit">暗号化して保存</button>
           </form>
         </section>

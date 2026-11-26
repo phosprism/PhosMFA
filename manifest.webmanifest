@@ -1,6 +1,6 @@
 {
-  "name": "Dreamy MFA",
-  "short_name": "Dreamy MFA",
+  "name": "PhosMFA",
+  "short_name": "PhosMFA",
   "description": "Discord authentication protected shared TOTP vault.",
   "start_url": "/",
   "scope": "/",

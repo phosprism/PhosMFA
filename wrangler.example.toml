@@ -1,4 +1,4 @@
-name = "dreamy-mfa"
+name = "phos-mfa"
 main = "worker/index.mjs"
 compatibility_date = "2026-06-01"
 

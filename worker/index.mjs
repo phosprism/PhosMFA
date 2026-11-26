@@ -39,7 +39,7 @@ export default {
 
 async function listAccounts(env) {
   const { results } = await env.DB.prepare(
-    `SELECT id, service_name, account_name, role_name, encrypted_secret, iv
+    `SELECT id, service_name, account_name, role_name, encrypted_secret, iv, algorithm, digits, period
        FROM totp_accounts
       WHERE deleted_at IS NULL
       ORDER BY service_name ASC, account_name ASC`,
@@ -48,13 +48,15 @@ async function listAccounts(env) {
   const accounts = [];
   for (const row of results) {
     const secret = await decryptSecret(row.encrypted_secret, row.iv, env);
+    const otp = normalizeOtpParams(row);
     accounts.push({
       id: row.id,
       service: row.service_name,
       account: row.account_name,
       role: row.role_name || "未分類",
       secret,
-      token: await generateTotp(secret),
+      ...otp,
+      token: await generateTotp(secret, Date.now(), otp),
     });
   }
 
@@ -68,21 +70,41 @@ async function createAccount(request, env, session) {
   const serviceName = String(body.service || "").trim();
   const accountName = String(body.account || "").trim();
   const roleName = String(body.role || "").trim();
-  const secret = normalizeSecret(String(body.secret || ""));
+  let parsed;
+  try {
+    parsed = parseSecretInput(String(body.secret || ""), body);
+  } catch (error) {
+    return json({ error: "invalid_otp_parameters" }, 400);
+  }
+  const { secret, otp } = parsed;
 
   if (!serviceName || !accountName || !secret) {
     return json({ error: "missing_required_fields" }, 400);
   }
 
-  await generateTotp(secret);
+  try {
+    await generateTotp(secret, Date.now(), otp);
+  } catch (error) {
+    return json({ error: "invalid_secret" }, 400);
+  }
   const encrypted = await encryptSecret(secret, env);
 
   const result = await env.DB.prepare(
     `INSERT INTO totp_accounts
-      (service_name, account_name, role_name, encrypted_secret, iv, created_by_discord_id)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+      (service_name, account_name, role_name, encrypted_secret, iv, algorithm, digits, period, created_by_discord_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(serviceName, accountName, roleName || null, encrypted.ciphertext, encrypted.iv, session.id)
+    .bind(
+      serviceName,
+      accountName,
+      roleName || null,
+      encrypted.ciphertext,
+      encrypted.iv,
+      otp.algorithm,
+      otp.digits,
+      otp.period,
+      session.id,
+    )
     .run();
 
   return json({ id: result.meta.last_row_id }, 201);
@@ -123,7 +145,7 @@ function renderLoginPage() {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#0f1b31">
     <link rel="manifest" href="/manifest.webmanifest">
-    <title>Discordログイン - Dreamy MFA</title>
+    <title>Discordログイン - PhosMFA</title>
     <style>
       body { align-items: center; background: #f5f7fb; color: #172033; display: flex; font-family: system-ui, sans-serif; min-height: 100vh; margin: 0; padding: 24px; }
       main { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; box-shadow: 0 16px 42px rgba(20,35,65,.12); margin: auto; max-width: 520px; padding: 32px; }
@@ -134,7 +156,7 @@ function renderLoginPage() {
   </head>
   <body>
     <main>
-      <h1>Dreamy MFA</h1>
+      <h1>PhosMFA</h1>
       <p>このページは許可されたDiscordユーザーだけが利用できます。</p>
       <a href="/auth/discord">Discordで続行</a>
     </main>
@@ -318,17 +340,45 @@ async function getVaultKey(env) {
   return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
-async function generateTotp(secret, timestamp = Date.now()) {
+const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
+const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
+
+function normalizeOtpParams(raw = {}, { strict = false } = {}) {
+  const algorithmInput = String(raw.algorithm ?? "").trim().toUpperCase().replace(/-/g, "");
+  const digitsInput = raw.digits === undefined || raw.digits === null || raw.digits === "" ? NaN : Number(raw.digits);
+  const periodInput = raw.period === undefined || raw.period === null || raw.period === "" ? NaN : Number(raw.period);
+
+  const algorithm = algorithmInput in OTP_HASHES ? algorithmInput : null;
+  const digits = Number.isInteger(digitsInput) && digitsInput >= 6 && digitsInput <= 8 ? digitsInput : null;
+  const period = Number.isInteger(periodInput) && periodInput >= 10 && periodInput <= 300 ? periodInput : null;
+
+  if (strict) {
+    if (algorithmInput && !algorithm) throw new Error("Unsupported algorithm.");
+    if (!Number.isNaN(digitsInput) && !digits) throw new Error("Unsupported digits.");
+    if (!Number.isNaN(periodInput) && !period) throw new Error("Unsupported period.");
+  }
+
+  return {
+    algorithm: algorithm || OTP_DEFAULTS.algorithm,
+    digits: digits || OTP_DEFAULTS.digits,
+    period: period || OTP_DEFAULTS.period,
+  };
+}
+
+async function generateTotp(secret, timestamp = Date.now(), params = OTP_DEFAULTS) {
+  const { algorithm, digits, period } = normalizeOtpParams(params);
   const key = await crypto.subtle.importKey(
     "raw",
     base32ToBytes(secret),
-    { name: "HMAC", hash: "SHA-1" },
+    { name: "HMAC", hash: OTP_HASHES[algorithm] },
     false,
     ["sign"],
   );
-  const counter = Math.floor(timestamp / 1000 / 30);
+  const counter = Math.floor(timestamp / 1000 / period);
   const buffer = new ArrayBuffer(8);
-  new DataView(buffer).setUint32(4, counter);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.floor(counter / 0x100000000));
+  view.setUint32(4, counter >>> 0);
   const hash = new Uint8Array(await crypto.subtle.sign("HMAC", key, buffer));
   const offset = hash[hash.length - 1] & 0x0f;
   const binary =
@@ -336,18 +386,30 @@ async function generateTotp(secret, timestamp = Date.now()) {
     (hash[offset + 1] << 16) |
     (hash[offset + 2] << 8) |
     hash[offset + 3];
-  return String(binary % 1_000_000).padStart(6, "0");
+  return String(binary % 10 ** digits).padStart(digits, "0");
 }
 
-function normalizeSecret(value) {
+function parseSecretInput(value, fields = {}) {
   const trimmed = value.trim();
-  if (!trimmed) return "";
+  if (!trimmed) return { secret: "", otp: normalizeOtpParams() };
 
   if (trimmed.startsWith("otpauth://")) {
     const url = new URL(trimmed);
-    return (url.searchParams.get("secret") || "").replace(/\s+/g, "").toUpperCase();
+    if (url.hostname.toLowerCase() !== "totp") throw new Error("Only TOTP is supported.");
+    const otp = normalizeOtpParams(
+      {
+        algorithm: url.searchParams.get("algorithm") ?? fields.algorithm,
+        digits: url.searchParams.get("digits") ?? fields.digits,
+        period: url.searchParams.get("period") ?? fields.period,
+      },
+      { strict: true },
+    );
+    return { secret: (url.searchParams.get("secret") || "").replace(/\s+/g, "").toUpperCase(), otp };
   }
-  return trimmed.replace(/\s+/g, "").toUpperCase();
+  return {
+    secret: trimmed.replace(/\s+/g, "").toUpperCase(),
+    otp: normalizeOtpParams(fields, { strict: true }),
+  };
 }
 
 function base32ToBytes(secret) {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "dreamy-mfa-v8";
+const CACHE_NAME = "phos-mfa-v12";
 const APP_SHELL = [
   "/index.html",
   "/styles.css",
@@ -98,11 +98,11 @@ async function cachedIndexResponse() {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Dreamy MFA</title>
+    <title>PhosMFA</title>
   </head>
   <body>
     <main style="font-family: system-ui, sans-serif; padding: 24px;">
-      <h1>Dreamy MFA</h1>
+      <h1>PhosMFA</h1>
       <p>オフライン用データがまだ準備できていません。オンラインで一度開き直してください。</p>
     </main>
   </body>
