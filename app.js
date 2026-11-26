@@ -7,7 +7,7 @@ const CACHE_KEY_ID = "account-cache-key-v1";
 const CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v2");
 const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
 const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
-const SERVICE_WORKER_CACHE = "phos-mfa-v24";
+const SERVICE_WORKER_CACHE = "phos-mfa-v25";
 // 開いたときのロックが有効な人のオフライン用キャッシュ (v3)。サーバーからもらう鍵 K で暗号化し、
 // K はパスコードから PBKDF2 で作った鍵で包んで保存する。パスコードを知らないと開けない。
 const OFFLINE_WRAP_KEY = "phos-mfa.offline-wrap.v1";
@@ -372,6 +372,36 @@ function renderAccounts() {
   renderSelection();
 }
 
+// コードが変わったときだけ書き換える。同じアカウントで新しいコードになったときは、数字を1桁ずつ順に出す
+function showToken(account) {
+  const formatted = formatTokenForDisplay(account.token);
+  const target = els.tokenText;
+  if (target.dataset.value === formatted && target.dataset.accountId === String(account.id)) return;
+
+  const refreshed =
+    target.dataset.accountId === String(account.id) && Boolean(target.dataset.value) && formatted !== "------";
+  target.dataset.value = formatted;
+  target.dataset.accountId = String(account.id);
+
+  if (!refreshed) {
+    target.textContent = formatted;
+    return;
+  }
+
+  // 空白は文字のまま残す (数字のあいだの間隔を word-spacing で取っているため)
+  let index = 0;
+  const nodes = [...formatted].map((char) => {
+    if (char === " ") return document.createTextNode(" ");
+    const digit = document.createElement("span");
+    digit.className = "token-digit";
+    digit.style.setProperty("--i", String(index));
+    index += 1;
+    digit.textContent = char;
+    return digit;
+  });
+  target.replaceChildren(...nodes);
+}
+
 function renderSelection() {
   const account = currentAccount();
   els.emptyState.classList.toggle("hidden", Boolean(account));
@@ -381,7 +411,7 @@ function renderSelection() {
   els.selectedRole.textContent = account.role;
   els.selectedService.textContent = account.service;
   els.selectedAccount.textContent = account.account;
-  els.tokenText.textContent = formatTokenForDisplay(account.token);
+  showToken(account);
   els.selectedAlgorithm.textContent = `OATH-TOTP / ${OTP_HASHES[account.algorithm] || "SHA-1"}`;
   els.selectedDigits.textContent = `${account.digits}桁`;
   els.selectedPeriod.textContent = `${account.period}秒`;

@@ -1408,3 +1408,37 @@ html.modal-open body {
   overflow: hidden;
   overscroll-behavior: none;
 }
+
+/* --- コードが更新されたときのアニメーション --- */
+
+.token-digit {
+  animation: token-digit-in 0.48s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(var(--i) * 45ms);
+  display: inline-block;
+}
+
+@keyframes token-digit-in {
+  from {
+    filter: blur(6px);
+    opacity: 0;
+    transform: translateY(0.38em);
+  }
+
+  to {
+    filter: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .token-digit {
+    animation: token-digit-fade 0.25s ease both;
+    animation-delay: 0s;
+  }
+
+  @keyframes token-digit-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+}
