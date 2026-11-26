@@ -7,7 +7,15 @@ const CACHE_KEY_ID = "account-cache-key-v1";
 const CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v2");
 const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
 const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
-const SERVICE_WORKER_CACHE = "phos-mfa-v12";
+const SERVICE_WORKER_CACHE = "phos-mfa-v13";
+// 開いたときのロックが有効な人のオフライン用キャッシュ (v3)。サーバーからもらう鍵 K で暗号化し、
+// K はパスコードから PBKDF2 で作った鍵で包んで保存する。パスコードを知らないと開けない。
+const OFFLINE_WRAP_KEY = "phos-mfa.offline-wrap.v1";
+const OFFLINE_FAILURES_KEY = "phos-mfa.offline-failures";
+const OFFLINE_CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v3");
+const PBKDF2_ITERATIONS = 600_000;
+const MAX_ATTEMPTS = 5;
+const UNLOCK_HEADER = "X-PhosMFA-Unlock";
 
 const state = {
   accounts: [],
@@ -22,6 +30,15 @@ const state = {
   accessRevoked: false,
   lastSyncAt: 0,
   syncing: false,
+  me: null,
+  isAdmin: false,
+  // 開いたときのロックを解除した証明。メモリにだけ置くので、再読み込みやアプリの再起動で消える。
+  unlockToken: "",
+  // オフライン用の鍵をパスコードで包むために、確認直後だけ一時的に持つ
+  pendingPasscode: "",
+  pendingPasscodeTimer: 0,
+  gatePromise: null,
+  passkeyOfferDone: false,
 };
 
 const els = {
@@ -66,6 +83,30 @@ const els = {
   qrStatus: document.querySelector("#qrStatus"),
   cameraPanel: document.querySelector("#cameraPanel"),
   discordUser: document.querySelector("#discordUser"),
+  settingsButton: document.querySelector("#settingsButton"),
+  adminButton: document.querySelector("#adminButton"),
+  gate: document.querySelector("#securityGate"),
+  gateTitle: document.querySelector("#gateTitle"),
+  gateMessage: document.querySelector("#gateMessage"),
+  gateBody: document.querySelector("#gateBody"),
+  gateError: document.querySelector("#gateError"),
+  gateUser: document.querySelector("#gateUser"),
+  gateLogout: document.querySelector("#gateLogout"),
+  settingsDialog: document.querySelector("#settingsDialog"),
+  unlockOnOpenToggle: document.querySelector("#unlockOnOpenToggle"),
+  unlockOnOpenStatus: document.querySelector("#unlockOnOpenStatus"),
+  passkeyList: document.querySelector("#passkeyList"),
+  addPasskeyButton: document.querySelector("#addPasskeyButton"),
+  passkeyStatus: document.querySelector("#passkeyStatus"),
+  passcodeChangeForm: document.querySelector("#passcodeChangeForm"),
+  currentPasscodeInput: document.querySelector("#currentPasscodeInput"),
+  newPasscodeInput: document.querySelector("#newPasscodeInput"),
+  confirmPasscodeInput: document.querySelector("#confirmPasscodeInput"),
+  passcodeChangeStatus: document.querySelector("#passcodeChangeStatus"),
+  adminDialog: document.querySelector("#adminDialog"),
+  adminReloadButton: document.querySelector("#adminReloadButton"),
+  adminStatus: document.querySelector("#adminStatus"),
+  adminUserList: document.querySelector("#adminUserList"),
 };
 
 registerServiceWorker();
@@ -76,6 +117,22 @@ els.lockButton.addEventListener("click", async () => {
   await clearAccountCache();
   location.href = "/logout";
 });
+els.gateLogout.addEventListener("click", async (event) => {
+  event.preventDefault();
+  await clearAccountCache();
+  location.href = "/logout";
+});
+els.settingsButton.addEventListener("click", openSettings);
+els.adminButton.addEventListener("click", openAdmin);
+els.adminReloadButton.addEventListener("click", loadAdminUsers);
+els.unlockOnOpenToggle.addEventListener("change", updateUnlockOnOpen);
+els.addPasskeyButton.addEventListener("click", addPasskeyFromSettings);
+els.passcodeChangeForm.addEventListener("submit", changePasscodeFromSettings);
+for (const dialog of [els.settingsDialog, els.adminDialog]) {
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog || event.target.closest("[data-close]")) dialog.close();
+  });
+}
 
 els.secretForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -103,11 +160,8 @@ els.secretForm.addEventListener("submit", async (event) => {
     return;
   }
 
-  const response = await fetch("/api/accounts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  const { response, data } = await api("/api/accounts", { method: "POST", body: payload });
+  if (await handleAccessError(response, data)) return;
 
   if (!response.ok) {
     alert("保存できませんでした。入力内容または権限を確認してください。");
@@ -160,7 +214,8 @@ els.deleteButton.addEventListener("click", async () => {
   const ok = confirm(`${selected.service} / ${selected.account} を削除しますか？`);
   if (!ok) return;
 
-  const response = await fetch(`/api/accounts/${selected.id}`, { method: "DELETE" });
+  const { response, data } = await api(`/api/accounts/${selected.id}`, { method: "DELETE" });
+  if (await handleAccessError(response, data)) return;
   if (!response.ok) {
     alert("削除できませんでした。");
     return;
@@ -171,14 +226,23 @@ els.deleteButton.addEventListener("click", async () => {
 });
 
 window.addEventListener("online", () => loadAccounts({ showError: false }));
-window.addEventListener("offline", () => enableOfflineFromCache());
+window.addEventListener("offline", () => {
+  // すでに表示中なら、手元のデータでそのまま続ける (ロック解除をやり直させない)
+  if (state.accounts.length && !state.offlineMode && state.me) {
+    state.offlineMode = true;
+    updatePermissionUi();
+    updateSyncStatus();
+    return;
+  }
+  enableOfflineFromCache();
+});
 window.setInterval(tick, 1000);
 
 async function init() {
   await tick();
 
-  const currentUser = await loadCurrentUser();
-  if (!currentUser) {
+  const me = await loadCurrentUser();
+  if (!me) {
     if (state.accessRevoked) return;
     if (shouldUseOfflineFallback()) {
       const restored = await enableOfflineFromCache();
@@ -188,7 +252,8 @@ async function init() {
     return;
   }
 
-  state.canAddSecrets = Boolean(currentUser.canAddSecrets);
+  // 2段階認証の登録・確認・開いたときのロック解除が終わるまで、ここで待つ
+  await ensureSecurity(me);
   state.offlineMode = false;
   updatePermissionUi();
   els.workspace.classList.remove("hidden");
@@ -202,19 +267,16 @@ async function loadAccounts({ showError = false } = {}) {
   state.syncing = true;
 
   try {
-    const response = await fetch("/api/accounts", { cache: "no-store" });
-    if (response.status === 401 || response.status === 403) {
-      forceLogout();
-      return;
-    }
+    const { response, data } = await api("/api/accounts");
+    // 確認画面を通ったら、次の tick ですぐ読み直す
+    if (await handleAccessError(response, data, { retry: () => { state.lastSyncAt = 0; } })) return;
     if (!response.ok) throw new Error("accounts request failed");
 
-    const data = await response.json();
     applyServerTime(data.serverTime);
     state.offlineMode = false;
     state.lastSyncAt = Date.now();
     state.accounts = await hydrateAccounts(data.accounts || []);
-    await cacheAccounts(state.accounts);
+    await cacheAccounts(state.accounts, data.offlineKey || null);
 
     if (!state.accounts.some((account) => account.id === state.selectedId)) {
       state.selectedId = state.accounts[0]?.id || "";
@@ -311,7 +373,7 @@ async function tick() {
   await refreshTokens(now);
   renderSelection();
 
-  if (!state.offlineMode && navigator.onLine && Date.now() - state.lastSyncAt > 30_000) {
+  if (state.me && !state.gatePromise && !state.offlineMode && navigator.onLine && Date.now() - state.lastSyncAt > 30_000) {
     await loadAccounts({ showError: false });
   }
 }
@@ -323,8 +385,9 @@ async function refreshTokens(now) {
 }
 
 async function enableOfflineFromCache() {
-  const cached = await loadCachedAccounts();
-  if (!cached.length) return false;
+  const stored = readStoredCache();
+  const cached = stored?.v === 3 ? await unlockOfflineCache(stored) : await loadCachedAccounts();
+  if (!cached || !cached.length) return false;
 
   state.accounts = await hydrateAccounts(cached);
   state.offlineMode = true;
@@ -344,7 +407,7 @@ async function enableOfflineFromCache() {
 // オフライン用キャッシュ。シードは AES-256-GCM で暗号化して localStorage に置く。
 // 鍵は取り出し不可 (extractable: false) の CryptoKey として IndexedDB に保存するので、
 // localStorage やディスク上のデータをコピーされても、このブラウザ外では復号できない。
-async function cacheAccounts(accounts) {
+async function cacheAccounts(accounts, offlineKey = null) {
   const payload = accounts.map(({ id, service, account, role, secret, algorithm, digits, period }) => ({
     id,
     service,
@@ -355,6 +418,13 @@ async function cacheAccounts(accounts) {
     digits,
     period,
   }));
+
+  if (offlineKey) {
+    await cacheAccountsWithPasscode(payload, offlineKey);
+    removeLegacyPlaintextCache();
+    return;
+  }
+  localStorage.removeItem(OFFLINE_WRAP_KEY);
 
   try {
     const key = await getCacheKey({ create: true });
@@ -421,6 +491,10 @@ function removeLegacyPlaintextCache() {
 
 async function clearAccountCache() {
   localStorage.removeItem(ACCOUNT_CACHE_KEY);
+  localStorage.removeItem(OFFLINE_WRAP_KEY);
+  localStorage.removeItem(OFFLINE_FAILURES_KEY);
+  forgetPendingPasscode();
+  state.unlockToken = "";
   removeLegacyPlaintextCache();
   cacheKeyPromise = null;
   try {
@@ -733,18 +807,14 @@ function setQrStatus(message) {
 
 async function loadCurrentUser() {
   try {
-    const response = await fetch("/api/me", { cache: "no-store" });
+    const { response, data } = await api("/api/me");
     if (response.status === 401 || response.status === 403) {
       forceLogout();
       return null;
     }
-    if (!response.ok) return null;
-    const data = await response.json();
-    if (!data.authenticated) return null;
-    applyServerTime(data.serverTime);
-    const name = data.user.globalName || data.user.username || data.user.id;
-    els.discordUser.textContent = name;
-    return data.user;
+    if (!response.ok || !data.authenticated) return null;
+    applyMe(data);
+    return data;
   } catch (error) {
     els.discordUser.textContent = "オフラインモード";
     return null;
@@ -843,4 +913,958 @@ function registerServiceWorker() {
       state.offlineReady = false;
     }
   });
+}
+
+// ===========================================================================
+// API
+// ===========================================================================
+
+async function api(path, { method = "GET", body } = {}) {
+  const headers = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (state.unlockToken) headers[UNLOCK_HEADER] = state.unlockToken;
+  const response = await fetch(path, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+  let data = {};
+  try {
+    data = await response.clone().json();
+  } catch (error) {
+    data = {};
+  }
+  return { response, data };
+}
+
+// 2段階認証が切れた・ロックされた等のときに確認画面へ戻す。処理したら true。
+async function handleAccessError(response, data, { retry } = {}) {
+  if (response.status === 423) {
+    await requireSecurityAgain();
+    return true;
+  }
+  if (response.status === 401) {
+    if (["mfa_required", "unlock_required", "mfa_setup_required"].includes(data.error)) {
+      if (data.error === "unlock_required") state.unlockToken = "";
+      await requireSecurityAgain();
+      if (retry) await retry();
+      return true;
+    }
+    forceLogout();
+    return true;
+  }
+  if (response.status === 403 && data.error !== "forbidden") {
+    forceLogout();
+    return true;
+  }
+  return false;
+}
+
+async function requireSecurityAgain() {
+  const me = await loadCurrentUser();
+  if (!me) return;
+  await ensureSecurity(me);
+}
+
+function applyMe(data) {
+  state.me = data;
+  applyServerTime(data.serverTime);
+  const name = data.user.globalName || data.user.username || data.user.id;
+  els.discordUser.textContent = name;
+  els.gateUser.textContent = `${name} としてログイン中`;
+  state.canAddSecrets = Boolean(data.user.canAddSecrets);
+  state.isAdmin = Boolean(data.security?.isAdmin);
+  els.adminButton.classList.toggle("hidden", !state.isAdmin);
+}
+
+// ===========================================================================
+// 2段階認証の画面 (登録・確認・開いたときのロック・アカウントロック)
+// ===========================================================================
+
+function ensureSecurity(me) {
+  if (!state.gatePromise) {
+    state.gatePromise = runSecurityGate(me).finally(() => {
+      state.gatePromise = null;
+    });
+  }
+  return state.gatePromise;
+}
+
+async function runSecurityGate(initial) {
+  let me = initial;
+  while (me.security.stage !== "ready") {
+    els.workspace.classList.add("hidden");
+    els.gate.classList.remove("hidden");
+    await renderGateStage(me);
+    const next = await loadCurrentUser();
+    if (!next) return new Promise(() => {});
+    me = next;
+  }
+  els.gate.classList.add("hidden");
+  els.gateBody.replaceChildren();
+  return me;
+}
+
+function renderGateStage(me) {
+  const security = me.security;
+  setGateError("");
+  if (security.stage === "locked") return renderLockedStage(security);
+  if (security.stage === "setup") {
+    if (!security.hasPasscode) return renderPasscodeSetupStage();
+    if (!security.passkeyCount && passkeySupported() && !state.passkeyOfferDone) return renderPasskeyOfferStage();
+    return renderUnlockChoiceStage();
+  }
+  return renderVerifyStage(security);
+}
+
+function renderLockedStage(security) {
+  setGate(
+    "アカウントがロックされています",
+    security.lockReason === "admin"
+      ? "管理者がこのアカウントをロックしました。使えるようにするには、管理者に連絡してください。"
+      : `パスコードかパスキーの確認に${MAX_ATTEMPTS}回失敗したため、ロックしました。解除するには管理者に連絡してください。`,
+  );
+  els.gateBody.replaceChildren();
+  return new Promise(() => {});
+}
+
+function renderPasscodeSetupStage() {
+  setGate(
+    "パスコードを登録してください",
+    "Discord アカウントが乗っ取られても PhosMFA を開けないよう、2段階認証を設定します。まず、パスキーが使えない端末でも使えるパスコードを決めてください。",
+  );
+
+  return new Promise((resolve) => {
+    const lengthGroup = choiceGroup("passcodeLength", [
+      { value: "6", label: "6桁（おすすめ）", checked: true },
+      { value: "4", label: "4桁" },
+    ]);
+    const first = passcodeInput("パスコード");
+    const second = passcodeInput("もう一度入力");
+    const submit = button("登録する", "submit");
+    const form = document.createElement("form");
+    form.className = "gate-body";
+    form.append(lengthGroup.element, first.label, second.label, hint("同じ数字の繰り返し（1111）や連番（1234）は使えません。"), submit);
+
+    const applyLength = () => {
+      const length = Number(lengthGroup.value());
+      for (const input of [first.input, second.input]) {
+        input.maxLength = length;
+        input.value = input.value.slice(0, length);
+      }
+    };
+    lengthGroup.element.addEventListener("change", applyLength);
+    applyLength();
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const length = Number(lengthGroup.value());
+      const passcode = first.input.value;
+      if (!new RegExp(`^\\d{${length}}$`).test(passcode)) return setGateError(`${length}桁の数字で入力してください。`);
+      if (passcode !== second.input.value) return setGateError("2回の入力が一致しません。");
+
+      await busy(submit, async () => {
+        const { response, data } = await api("/api/mfa/passcode/setup", { method: "POST", body: { passcode } });
+        if (!response.ok) return setGateError(errorMessage(data));
+        acceptVerification(data, passcode);
+        resolve();
+      });
+    });
+
+    els.gateBody.replaceChildren(form);
+    first.input.focus();
+  });
+}
+
+function renderPasskeyOfferStage() {
+  setGate(
+    "パスキーも登録しませんか",
+    "パスキーを登録すると、指紋・顔認証・端末のロック解除だけで PhosMFA を開けます。パスコードより安全で、入力の手間もかかりません。",
+  );
+
+  return new Promise((resolve) => {
+    const register = button("パスキーを登録する");
+    const skip = button("あとで", "button", "link-button");
+    register.addEventListener("click", () =>
+      busy(register, async () => {
+        const result = await registerPasskey();
+        if (result.ok) {
+          state.passkeyOfferDone = true;
+          resolve();
+        } else if (result.message) {
+          setGateError(result.message);
+        }
+      }),
+    );
+    skip.addEventListener("click", () => {
+      state.passkeyOfferDone = true;
+      resolve();
+    });
+    els.gateBody.replaceChildren(register, skip, hint("あとから「セキュリティ設定」でも追加できます。"));
+  });
+}
+
+function renderUnlockChoiceStage() {
+  setGate(
+    "開いたときにもロックしますか",
+    "オンにすると、ページや PWA を開くたびにパスキーかパスコードを求めます。オフにすると、Discord でログインしたときだけ確認します。",
+  );
+
+  return new Promise((resolve) => {
+    const yes = button("開くたびに確認する（おすすめ）");
+    const no = button("ログインのときだけ確認する", "button", "secondary");
+    const choose = (value, target) =>
+      busy(target, async () => {
+        const { response, data } = await api("/api/mfa/preferences", { method: "POST", body: { unlockOnOpen: value } });
+        if (!response.ok) return setGateError(errorMessage(data));
+        if (data.unlockToken) state.unlockToken = data.unlockToken;
+        resolve();
+      });
+    yes.addEventListener("click", () => choose(true, yes));
+    no.addEventListener("click", () => choose(false, no));
+    els.gateBody.replaceChildren(yes, no, hint("あとから「セキュリティ設定」で変更できます。"));
+  });
+}
+
+function renderVerifyStage(security) {
+  const unlocking = security.stage === "unlock";
+  setGate(
+    unlocking ? "ロックを解除してください" : "2段階認証",
+    unlocking
+      ? "パスキーかパスコードで本人確認をすると、認証コードを表示します。"
+      : "Discord でのログインを確認しました。続けて、登録したパスキーかパスコードで本人確認をしてください。",
+  );
+
+  return new Promise((resolve) => {
+    const nodes = [];
+    const canUsePasskey = security.passkeyCount > 0 && passkeySupported();
+    if (canUsePasskey) {
+      const passkeyButton = button("パスキーで確認");
+      passkeyButton.addEventListener("click", () =>
+        busy(passkeyButton, async () => {
+          const result = await authenticateWithPasskey();
+          if (result.ok) return resolve();
+          if (result.locked) return resolve();
+          if (result.message) setGateError(result.message);
+        }),
+      );
+      nodes.push(passkeyButton, divider("またはパスコード"));
+    }
+
+    const field = passcodeInput(`パスコード（${security.passcodeLength || "4〜6"}桁）`);
+    field.input.maxLength = security.passcodeLength || 6;
+    const submit = button("確認", "submit", canUsePasskey ? "secondary" : "");
+    const form = document.createElement("form");
+    form.className = "gate-body";
+    form.append(field.label, submit);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const passcode = field.input.value;
+      if (!/^\d{4,6}$/.test(passcode)) return setGateError("パスコードを入力してください。");
+      await busy(submit, async () => {
+        const { response, data } = await api("/api/mfa/passcode/verify", { method: "POST", body: { passcode } });
+        if (response.status === 423) return resolve();
+        if (!response.ok) {
+          field.input.value = "";
+          field.input.focus();
+          return setGateError(errorMessage(data));
+        }
+        acceptVerification(data, passcode);
+        resolve();
+      });
+    });
+    nodes.push(form);
+    if (security.remainingAttempts < MAX_ATTEMPTS) {
+      nodes.push(hint(`あと${security.remainingAttempts}回失敗すると、アカウントがロックされます。`));
+    }
+
+    els.gateBody.replaceChildren(...nodes);
+    if (!canUsePasskey) field.input.focus();
+  });
+}
+
+function acceptVerification(data, passcode = "") {
+  if (data.unlockToken) state.unlockToken = data.unlockToken;
+  if (passcode) rememberPendingPasscode(passcode);
+}
+
+function setGate(title, message) {
+  els.gateTitle.textContent = title;
+  els.gateMessage.textContent = message;
+}
+
+function setGateError(message) {
+  els.gateError.textContent = message || "";
+}
+
+function errorMessage(data) {
+  const remaining = Number.isFinite(data.remainingAttempts) ? data.remainingAttempts : null;
+  switch (data.error) {
+    case "passcode_format":
+      return "パスコードは4桁か6桁の数字にしてください。";
+    case "passcode_too_simple":
+      return "推測されやすい番号（同じ数字の繰り返しや連番）は使えません。";
+    case "invalid_passcode":
+      return `パスコードが違います。あと${remaining}回失敗するとロックされます。`;
+    case "invalid_passkey":
+      return `パスキーを確認できませんでした。あと${remaining}回失敗するとロックされます。`;
+    case "locked":
+      return "アカウントがロックされています。管理者に連絡してください。";
+    case "challenge_expired":
+      return "時間が経ちすぎました。もう一度お試しください。";
+    case "passkey_invalid":
+      return "このパスキーは登録できませんでした。";
+    case "passkey_already_registered":
+      return "このパスキーはすでに登録されています。";
+    case "too_many_passkeys":
+      return "パスキーは10個まで登録できます。";
+    case "cannot_lock_self":
+      return "自分自身はロックできません。";
+    default:
+      return "処理できませんでした。時間をおいて、もう一度お試しください。";
+  }
+}
+
+// --- 画面部品 ---
+
+function button(text, type = "button", className = "") {
+  const element = document.createElement("button");
+  element.type = type;
+  element.textContent = text;
+  if (className) element.className = className;
+  return element;
+}
+
+function hint(text) {
+  const element = document.createElement("p");
+  element.className = "hint";
+  element.textContent = text;
+  return element;
+}
+
+function divider(text) {
+  const element = document.createElement("div");
+  element.className = "divider";
+  element.textContent = text;
+  return element;
+}
+
+function passcodeInput(labelText) {
+  const label = document.createElement("label");
+  const caption = document.createElement("span");
+  caption.textContent = labelText;
+  const input = document.createElement("input");
+  input.type = "password";
+  input.inputMode = "numeric";
+  input.autocomplete = "off";
+  input.pattern = "\\d*";
+  input.maxLength = 6;
+  input.className = "passcode-input";
+  input.addEventListener("input", () => {
+    input.value = input.value.replace(/\D/g, "").slice(0, input.maxLength);
+  });
+  label.append(caption, input);
+  return { label, input };
+}
+
+function choiceGroup(name, options) {
+  const element = document.createElement("div");
+  element.className = "choice-group";
+  element.setAttribute("role", "radiogroup");
+  for (const option of options) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = name;
+    input.value = option.value;
+    input.checked = Boolean(option.checked);
+    const span = document.createElement("span");
+    span.textContent = option.label;
+    label.append(input, span);
+    element.append(label);
+  }
+  return { element, value: () => element.querySelector("input:checked")?.value };
+}
+
+async function busy(target, action) {
+  target.disabled = true;
+  try {
+    await action();
+  } catch (error) {
+    setGateError("通信できませんでした。接続を確認して、もう一度お試しください。");
+  } finally {
+    target.disabled = false;
+  }
+}
+
+// ===========================================================================
+// パスキー (WebAuthn)
+// ===========================================================================
+
+function passkeySupported() {
+  return Boolean(window.PublicKeyCredential && navigator.credentials?.create && window.isSecureContext);
+}
+
+async function registerPasskey() {
+  const { response, data } = await api("/api/mfa/passkey/register/options", { method: "POST", body: {} });
+  if (!response.ok) return { ok: false, message: errorMessage(data) };
+
+  let credential;
+  try {
+    credential = await navigator.credentials.create({
+      publicKey: {
+        ...data,
+        challenge: base64UrlToBuffer(data.challenge),
+        user: { ...data.user, id: base64UrlToBuffer(data.user.id) },
+        excludeCredentials: data.excludeCredentials.map((item) => ({ ...item, id: base64UrlToBuffer(item.id) })),
+      },
+    });
+  } catch (error) {
+    return { ok: false, message: passkeyErrorMessage(error) };
+  }
+  if (!credential) return { ok: false, message: "パスキーを作成できませんでした。" };
+
+  const body = {
+    credential: {
+      id: credential.id,
+      rawId: bufferToBase64Url(credential.rawId),
+      type: credential.type,
+      response: {
+        clientDataJSON: bufferToBase64Url(credential.response.clientDataJSON),
+        attestationObject: bufferToBase64Url(credential.response.attestationObject),
+        transports: credential.response.getTransports?.() || [],
+      },
+    },
+  };
+  const result = await api("/api/mfa/passkey/register", { method: "POST", body });
+  if (!result.response.ok) return { ok: false, message: errorMessage(result.data) };
+  return { ok: true };
+}
+
+async function authenticateWithPasskey() {
+  const { response, data } = await api("/api/mfa/passkey/auth/options", { method: "POST", body: {} });
+  if (response.status === 423) return { ok: false, locked: true };
+  if (!response.ok) return { ok: false, message: errorMessage(data) };
+
+  let assertion;
+  try {
+    assertion = await navigator.credentials.get({
+      publicKey: {
+        ...data,
+        challenge: base64UrlToBuffer(data.challenge),
+        allowCredentials: data.allowCredentials.map((item) => ({ ...item, id: base64UrlToBuffer(item.id) })),
+      },
+    });
+  } catch (error) {
+    return { ok: false, message: passkeyErrorMessage(error) };
+  }
+  if (!assertion) return { ok: false, message: "パスキーを確認できませんでした。" };
+
+  const body = {
+    credential: {
+      id: assertion.id,
+      rawId: bufferToBase64Url(assertion.rawId),
+      type: assertion.type,
+      response: {
+        clientDataJSON: bufferToBase64Url(assertion.response.clientDataJSON),
+        authenticatorData: bufferToBase64Url(assertion.response.authenticatorData),
+        signature: bufferToBase64Url(assertion.response.signature),
+        userHandle: assertion.response.userHandle ? bufferToBase64Url(assertion.response.userHandle) : null,
+      },
+    },
+  };
+  const result = await api("/api/mfa/passkey/auth", { method: "POST", body });
+  if (result.response.status === 423) return { ok: false, locked: true };
+  if (!result.response.ok) return { ok: false, message: errorMessage(result.data) };
+  acceptVerification(result.data);
+  return { ok: true };
+}
+
+function passkeyErrorMessage(error) {
+  if (error?.name === "NotAllowedError") return "パスキーの確認がキャンセルされたか、時間切れになりました。";
+  if (error?.name === "InvalidStateError") return "このパスキーはすでに登録されています。";
+  if (error?.name === "NotSupportedError") return "この端末ではパスキーを使えません。パスコードを使ってください。";
+  return "パスキーを使えませんでした。パスコードを使ってください。";
+}
+
+function base64UrlToBuffer(value) {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return Uint8Array.from(atob(base64), (char) => char.charCodeAt(0)).buffer;
+}
+
+function bufferToBase64Url(buffer) {
+  return bytesToBase64(new Uint8Array(buffer)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+// ===========================================================================
+// 開いたときのロックが有効な人のオフライン用キャッシュ (v3)
+// ===========================================================================
+
+function rememberPendingPasscode(passcode) {
+  forgetPendingPasscode();
+  state.pendingPasscode = passcode;
+  state.pendingPasscodeTimer = window.setTimeout(forgetPendingPasscode, 2 * 60 * 1000);
+}
+
+function forgetPendingPasscode() {
+  if (state.pendingPasscodeTimer) window.clearTimeout(state.pendingPasscodeTimer);
+  state.pendingPasscode = "";
+  state.pendingPasscodeTimer = 0;
+}
+
+function readStoredCache() {
+  try {
+    return JSON.parse(localStorage.getItem(ACCOUNT_CACHE_KEY) || "null");
+  } catch (error) {
+    return null;
+  }
+}
+
+async function cacheAccountsWithPasscode(payload, offlineKey) {
+  try {
+    const rawKey = new Uint8Array(base64UrlToBuffer(offlineKey));
+    const kid = await keyId(rawKey);
+    let wrap = null;
+    try {
+      wrap = JSON.parse(localStorage.getItem(OFFLINE_WRAP_KEY) || "null");
+    } catch (error) {
+      wrap = null;
+    }
+
+    // パスコードを入力した直後なら、オフライン用の鍵をパスコードで包み直す
+    if (state.pendingPasscode) {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const wrappingKey = await passcodeKey(state.pendingPasscode, salt, ["encrypt"]);
+      const wrapped = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, wrappingKey, rawKey);
+      wrap = { v: 1, kid, salt: bytesToBase64(salt), iv: bytesToBase64(iv), data: bytesToBase64(new Uint8Array(wrapped)) };
+      localStorage.setItem(OFFLINE_WRAP_KEY, JSON.stringify(wrap));
+      localStorage.removeItem(OFFLINE_FAILURES_KEY);
+      forgetPendingPasscode();
+    }
+
+    // この端末でまだパスコードを入力していない (パスキーだけ) ときは、オフライン用には保存しない
+    if (!wrap || wrap.kid !== kid) {
+      localStorage.removeItem(ACCOUNT_CACHE_KEY);
+      localStorage.removeItem(OFFLINE_WRAP_KEY);
+      return;
+    }
+
+    const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["encrypt"]);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: OFFLINE_CACHE_AAD },
+      key,
+      new TextEncoder().encode(JSON.stringify(payload)),
+    );
+    localStorage.setItem(
+      ACCOUNT_CACHE_KEY,
+      JSON.stringify({ v: 3, kid, iv: bytesToBase64(iv), data: bytesToBase64(new Uint8Array(ciphertext)) }),
+    );
+  } catch (error) {
+    localStorage.removeItem(ACCOUNT_CACHE_KEY);
+  }
+}
+
+function unlockOfflineCache(stored) {
+  let wrap = null;
+  try {
+    wrap = JSON.parse(localStorage.getItem(OFFLINE_WRAP_KEY) || "null");
+  } catch (error) {
+    wrap = null;
+  }
+  if (!wrap || wrap.kid !== stored.kid) return Promise.resolve(null);
+
+  els.workspace.classList.add("hidden");
+  els.gate.classList.remove("hidden");
+  els.gateUser.textContent = "オフライン";
+  setGate("ロックを解除してください", "オフラインのため、この端末に保存したデータをパスコードで開きます。パスキーはオフラインでは使えません。");
+  setGateError("");
+
+  return new Promise((resolve) => {
+    const field = passcodeInput("パスコード");
+    const submit = button("解除", "submit");
+    const form = document.createElement("form");
+    form.className = "gate-body";
+    const remainingHint = hint("");
+    form.append(field.label, submit, remainingHint);
+
+    const showRemaining = () => {
+      const failures = Number(localStorage.getItem(OFFLINE_FAILURES_KEY) || 0);
+      remainingHint.textContent =
+        failures > 0 ? `あと${MAX_ATTEMPTS - failures}回失敗すると、この端末に保存したデータを消去します。` : "";
+    };
+    showRemaining();
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const passcode = field.input.value;
+      if (!/^\d{4,6}$/.test(passcode)) return setGateError("パスコードを入力してください。");
+      submit.disabled = true;
+      try {
+        const wrappingKey = await passcodeKey(passcode, base64ToBytes(wrap.salt), ["decrypt"]);
+        const rawKey = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(wrap.iv) }, wrappingKey, base64ToBytes(wrap.data));
+        const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"]);
+        const plain = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv: base64ToBytes(stored.iv), additionalData: OFFLINE_CACHE_AAD },
+          key,
+          base64ToBytes(stored.data),
+        );
+        localStorage.removeItem(OFFLINE_FAILURES_KEY);
+        const parsed = JSON.parse(new TextDecoder().decode(plain));
+        els.gate.classList.add("hidden");
+        resolve(Array.isArray(parsed) ? parsed.filter((account) => account.secret) : []);
+      } catch (error) {
+        const failures = Number(localStorage.getItem(OFFLINE_FAILURES_KEY) || 0) + 1;
+        if (failures >= MAX_ATTEMPTS) {
+          await clearAccountCache();
+          setGate("データを消去しました", `パスコードを${MAX_ATTEMPTS}回間違えたため、この端末に保存したデータを消去しました。オンラインに戻ってからログインしてください。`);
+          els.gateBody.replaceChildren();
+          setGateError("");
+          return;
+        }
+        localStorage.setItem(OFFLINE_FAILURES_KEY, String(failures));
+        field.input.value = "";
+        setGateError("パスコードが違います。");
+        showRemaining();
+      } finally {
+        submit.disabled = false;
+      }
+    });
+
+    els.gateBody.replaceChildren(form);
+    field.input.focus();
+  });
+}
+
+async function passcodeKey(passcode, salt, usages) {
+  const material = await crypto.subtle.importKey("raw", new TextEncoder().encode(passcode), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations: PBKDF2_ITERATIONS },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    usages,
+  );
+}
+
+async function keyId(rawKey) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", rawKey));
+  return bytesToBase64(digest.slice(0, 9));
+}
+
+// ===========================================================================
+// セキュリティ設定
+// ===========================================================================
+
+async function openSettings() {
+  if (state.offlineMode) {
+    alert("オフライン中は設定を変更できません。");
+    return;
+  }
+  for (const element of [els.unlockOnOpenStatus, els.passkeyStatus, els.passcodeChangeStatus]) setStatus(element, "");
+  els.passcodeChangeForm.reset();
+  els.unlockOnOpenToggle.checked = Boolean(state.me?.security?.unlockOnOpen);
+  els.addPasskeyButton.classList.toggle("hidden", !passkeySupported());
+  els.settingsDialog.showModal();
+  await loadPasskeys();
+}
+
+async function updateUnlockOnOpen() {
+  const value = els.unlockOnOpenToggle.checked;
+  els.unlockOnOpenToggle.disabled = true;
+  try {
+    const { response, data } = await api("/api/mfa/preferences", { method: "POST", body: { unlockOnOpen: value } });
+    if (await handleSettingsAccessError(response, data)) return;
+    if (!response.ok) throw new Error(data.error);
+    if (data.unlockToken) state.unlockToken = data.unlockToken;
+    if (state.me?.security) state.me.security.unlockOnOpen = value;
+    setStatus(
+      els.unlockOnOpenStatus,
+      value
+        ? "オンにしました。オフラインでも使うには、この端末で一度パスコードを入力してください（次回の解除時）。"
+        : "オフにしました。",
+    );
+    state.lastSyncAt = 0;
+  } catch (error) {
+    els.unlockOnOpenToggle.checked = !value;
+    setStatus(els.unlockOnOpenStatus, "変更できませんでした。", true);
+  } finally {
+    els.unlockOnOpenToggle.disabled = false;
+  }
+}
+
+async function loadPasskeys() {
+  els.passkeyList.replaceChildren();
+  const { response, data } = await api("/api/mfa/passkeys");
+  if (await handleSettingsAccessError(response, data)) return;
+  if (!response.ok) {
+    setStatus(els.passkeyStatus, "パスキーを読み込めませんでした。", true);
+    return;
+  }
+
+  if (!data.passkeys.length) {
+    const empty = document.createElement("li");
+    empty.className = "empty";
+    empty.textContent = "パスキーは登録されていません。";
+    els.passkeyList.append(empty);
+  }
+  for (const passkey of data.passkeys) {
+    const item = document.createElement("li");
+    const text = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = passkey.name;
+    const meta = document.createElement("small");
+    meta.textContent = `登録 ${formatDate(passkey.createdAt)}・最終使用 ${passkey.lastUsedAt ? formatDate(passkey.lastUsedAt) : "なし"}`;
+    text.append(name, meta);
+    const remove = button("削除", "button", "danger small-button");
+    remove.addEventListener("click", async () => {
+      if (!confirm(`パスキー「${passkey.name}」を削除しますか？`)) return;
+      remove.disabled = true;
+      const result = await api(`/api/mfa/passkeys/${encodeURIComponent(passkey.id)}`, { method: "DELETE" });
+      if (await handleSettingsAccessError(result.response, result.data)) return;
+      setStatus(els.passkeyStatus, result.response.ok ? "削除しました。" : "削除できませんでした。", !result.response.ok);
+      await loadPasskeys();
+    });
+    item.append(text, remove);
+    els.passkeyList.append(item);
+  }
+  if (state.me?.security) state.me.security.passkeyCount = data.passkeys.length;
+}
+
+async function addPasskeyFromSettings() {
+  els.addPasskeyButton.disabled = true;
+  try {
+    const result = await registerPasskey();
+    setStatus(els.passkeyStatus, result.ok ? "パスキーを登録しました。" : result.message, !result.ok);
+    if (result.ok) await loadPasskeys();
+  } catch (error) {
+    setStatus(els.passkeyStatus, "パスキーを登録できませんでした。", true);
+  } finally {
+    els.addPasskeyButton.disabled = false;
+  }
+}
+
+async function changePasscodeFromSettings(event) {
+  event.preventDefault();
+  const current = els.currentPasscodeInput.value;
+  const passcode = els.newPasscodeInput.value;
+  if (!/^(\d{4}|\d{6})$/.test(passcode)) return setStatus(els.passcodeChangeStatus, "新しいパスコードは4桁か6桁の数字にしてください。", true);
+  if (passcode !== els.confirmPasscodeInput.value) return setStatus(els.passcodeChangeStatus, "確認用の入力が一致しません。", true);
+
+  const submit = els.passcodeChangeForm.querySelector("button[type=submit]");
+  submit.disabled = true;
+  try {
+    const { response, data } = await api("/api/mfa/passcode/change", { method: "POST", body: { current, passcode } });
+    if (response.status === 423) {
+      els.settingsDialog.close();
+      await requireSecurityAgain();
+      return;
+    }
+    if (await handleSettingsAccessError(response, data)) return;
+    if (!response.ok) return setStatus(els.passcodeChangeStatus, errorMessage(data), true);
+    els.passcodeChangeForm.reset();
+    rememberPendingPasscode(passcode);
+    state.lastSyncAt = 0;
+    setStatus(els.passcodeChangeStatus, "パスコードを変更しました。");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function handleSettingsAccessError(response, data) {
+  if (response.status === 401 && data.error !== "invalid_passcode" && data.error !== "invalid_passkey") {
+    els.settingsDialog.close();
+    els.adminDialog.close();
+    await handleAccessError(response, data);
+    return true;
+  }
+  if (response.status === 423) {
+    els.settingsDialog.close();
+    els.adminDialog.close();
+    await requireSecurityAgain();
+    return true;
+  }
+  return false;
+}
+
+function setStatus(element, message, isError = false) {
+  element.textContent = message || "";
+  element.classList.toggle("error", Boolean(isError && message));
+}
+
+// ===========================================================================
+// 管理者: 利用者の管理
+// ===========================================================================
+
+const EVENT_LABELS = {
+  discord_login: "Discord でログイン",
+  passcode_set: "パスコードを登録",
+  passcode_changed: "パスコードを変更",
+  verified: "本人確認に成功",
+  passcode_failed: "パスコードを間違えた",
+  passcode_change_failed: "パスコード変更で間違えた",
+  passkey_failed: "パスキーの確認に失敗",
+  passkey_added: "パスキーを追加",
+  passkey_removed: "パスキーを削除",
+  unlock_on_open: "開いたときのロックを変更",
+  locked: "ロックされた",
+  admin_unlock: "管理者がロックを解除",
+  admin_lock: "管理者がロック",
+  admin_reset: "管理者が2段階認証をリセット",
+};
+
+async function openAdmin() {
+  if (state.offlineMode) {
+    alert("オフライン中は管理画面を使えません。");
+    return;
+  }
+  els.adminDialog.showModal();
+  await loadAdminUsers();
+}
+
+async function loadAdminUsers() {
+  setStatus(els.adminStatus, "読み込んでいます…");
+  const { response, data } = await api("/api/admin/users");
+  if (await handleSettingsAccessError(response, data)) return;
+  if (!response.ok) {
+    setStatus(els.adminStatus, "読み込めませんでした。", true);
+    return;
+  }
+  setStatus(els.adminStatus, `${data.users.length}人`);
+  els.adminUserList.replaceChildren(...data.users.map(renderAdminUser));
+}
+
+function renderAdminUser(user) {
+  const card = document.createElement("article");
+  card.className = `admin-user${user.lockedAt ? " is-locked" : ""}`;
+  const isSelf = user.id === state.me?.user?.id;
+
+  const head = document.createElement("div");
+  head.className = "admin-user-head";
+  const name = document.createElement("div");
+  name.className = "admin-user-name";
+  name.textContent = `${user.globalName || user.username || user.id}${isSelf ? "（自分）" : ""}${user.isAdmin ? "・管理者" : ""}`;
+  const sub = document.createElement("small");
+  sub.textContent = `@${user.username || "-"} / ${user.id}`;
+  name.append(sub);
+
+  const pill = document.createElement("span");
+  if (user.lockedAt) {
+    pill.className = "pill danger";
+    pill.textContent = user.lockReason === "admin" ? "管理者がロック中" : `${MAX_ATTEMPTS}回失敗でロック中`;
+  } else if (!user.hasPasscode) {
+    pill.className = "pill warn";
+    pill.textContent = "2段階認証 未登録";
+  } else {
+    pill.className = "pill ok";
+    pill.textContent = "利用中";
+  }
+  head.append(name, pill);
+
+  const facts = document.createElement("dl");
+  facts.className = "admin-facts";
+  const addFact = (label, value) => {
+    const wrapper = document.createElement("div");
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    wrapper.append(dt, dd);
+    facts.append(wrapper);
+  };
+  addFact("2段階認証", user.hasPasscode ? `パスコード${user.passkeyCount ? `＋パスキー${user.passkeyCount}個` : "のみ"}` : "なし");
+  addFact("開いたときのロック", user.unlockOnOpen === null ? "未選択" : user.unlockOnOpen ? "オン" : "オフ");
+  addFact("最終ログイン", user.lastLoginAt ? formatDate(user.lastLoginAt) : "-");
+  addFact("最終確認", user.lastVerifiedAt ? formatDate(user.lastVerifiedAt) : "-");
+  addFact("連続失敗", `${user.failedAttempts}回${user.lastFailedAt ? `（最後 ${formatDate(user.lastFailedAt)}）` : ""}`);
+  if (user.lockedAt) addFact("ロック日時", formatDate(user.lockedAt));
+
+  const actions = document.createElement("div");
+  actions.className = "admin-actions";
+  const action = (label, path, message, className = "secondary small-button") => {
+    const element = button(label, "button", className);
+    element.addEventListener("click", async () => {
+      if (!confirm(message)) return;
+      element.disabled = true;
+      const result = await api(`/api/admin/users/${user.id}/${path}`, { method: "POST", body: {} });
+      if (await handleSettingsAccessError(result.response, result.data)) return;
+      if (!result.response.ok) {
+        setStatus(els.adminStatus, errorMessage(result.data), true);
+        element.disabled = false;
+        return;
+      }
+      if (isSelf && path === "reset") {
+        location.reload();
+        return;
+      }
+      await loadAdminUsers();
+    });
+    actions.append(element);
+  };
+  const displayName = user.globalName || user.username || user.id;
+  if (user.lockedAt) action("ロックを解除", "unlock", `${displayName} のロックを解除しますか？`, "small-button");
+  if (user.hasPasscode || user.passkeyCount) {
+    action(
+      "2段階認証をリセット",
+      "reset",
+      `${displayName} のパスコードとパスキーを削除し、ログイン中のセッションも無効にします。次のログインで登録し直しになります。よろしいですか？`,
+    );
+  }
+  if (!user.lockedAt && !isSelf) {
+    action(
+      "ロックして強制ログアウト",
+      "lock",
+      `${displayName} をロックし、ログイン中のセッションも無効にします。解除するまで使えなくなります。よろしいですか？`,
+      "danger small-button",
+    );
+  }
+
+  const events = document.createElement("details");
+  events.className = "admin-events";
+  const summary = document.createElement("summary");
+  summary.textContent = "ログイン・認証の履歴";
+  const list = document.createElement("ol");
+  events.append(summary, list);
+  events.addEventListener("toggle", async () => {
+    if (!events.open || list.childElementCount) return;
+    const result = await api(`/api/admin/users/${user.id}/events`);
+    if (!result.response.ok) {
+      list.append(Object.assign(document.createElement("li"), { textContent: "読み込めませんでした。" }));
+      return;
+    }
+    if (!result.data.events.length) {
+      list.append(Object.assign(document.createElement("li"), { textContent: "履歴はありません。" }));
+    }
+    for (const event of result.data.events) {
+      const item = document.createElement("li");
+      const time = document.createElement("time");
+      time.textContent = formatDate(event.createdAt);
+      const text = document.createElement("span");
+      const detail = event.detail ? `（${event.detail}）` : "";
+      const where = [event.ip, event.country].filter(Boolean).join(" / ");
+      text.textContent = `${EVENT_LABELS[event.event] || event.event}${detail}${where ? ` — ${where}` : ""}`;
+      item.append(time, text);
+      list.append(item);
+    }
+  });
+
+  card.append(head, facts, actions, events);
+  return card;
+}
+
+// D1 の CURRENT_TIMESTAMP は UTC の "YYYY-MM-DD HH:MM:SS"
+function formatDate(value) {
+  if (!value) return "-";
+  const date = new Date(String(value).includes("T") ? value : `${String(value).replace(" ", "T")}Z`);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }

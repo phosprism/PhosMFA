@@ -1,6 +1,39 @@
-const COOKIE_SESSION = "mfa_session";
+import {
+  SESSION_MAX_AGE_SECONDS,
+  signJson,
+  verifySignedJson,
+  signValue,
+  verifySignedValue,
+  hmacSha256,
+  sha256Bytes,
+  cookie,
+  clearCookie,
+  parseCookies,
+  canAddSecrets,
+  parseCsv,
+  assertDiscordConfig,
+  json,
+  html,
+  toBytes,
+  hexToBytes,
+  base64UrlEncode,
+  base64UrlDecode,
+  timingSafeEqual,
+  getVaultRaw,
+} from "./util.mjs";
+import {
+  COOKIE_SESSION,
+  buildSession,
+  handleAdminApi,
+  handleMfaApi,
+  loadUser,
+  offlineKeyFor,
+  requireFullAccess,
+  securitySummary,
+  sessionCookie,
+  upsertUserOnLogin,
+} from "./security.mjs";
 const COOKIE_OAUTH_STATE = "mfa_oauth_state";
-const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 const OAUTH_STATE_MAX_AGE_SECONDS = 60 * 10;
 
 export default {
@@ -20,14 +53,31 @@ export default {
       }
       if (!isSessionAllowed(session, env)) return revokeSession(request);
 
-      if (url.pathname === "/api/me") return currentUser(session, env);
-      if (url.pathname === "/api/accounts" && request.method === "GET") return listAccounts(env);
+      // 管理者のロック・2段階認証リセットで epoch が変わると、それ以前のセッションは使えなくなる
+      const user = await loadUser(env, session.id);
+      if (!user || session.epoch !== user.session_epoch) return revokeSession(request);
+
+      if (url.pathname === "/api/me") return currentUser(request, session, user, env);
+      if (url.pathname.startsWith("/api/mfa/")) {
+        return handleMfaApi(request, env, session, user, url.pathname.slice("/api/mfa".length));
+      }
+
+      if (url.pathname.startsWith("/api/")) {
+        const denied = await requireFullAccess(request, env, session, user);
+        if (denied) return denied;
+      }
+
+      if (url.pathname.startsWith("/api/admin/")) {
+        return handleAdminApi(request, env, session, user, url.pathname.slice("/api/admin".length));
+      }
+      if (url.pathname === "/api/accounts" && request.method === "GET") return listAccounts(env, user);
       if (url.pathname === "/api/accounts" && request.method === "POST") return createAccount(request, env, session);
 
       const deleteMatch = url.pathname.match(/^\/api\/accounts\/(\d+)$/);
       if (deleteMatch && request.method === "DELETE") {
         return deleteAccount(Number(deleteMatch[1]), env, session);
       }
+      if (url.pathname.startsWith("/api/")) return json({ error: "not_found" }, 404);
 
       return env.ASSETS.fetch(request);
     } catch (error) {
@@ -37,7 +87,7 @@ export default {
   },
 };
 
-async function listAccounts(env) {
+async function listAccounts(env, user) {
   const { results } = await env.DB.prepare(
     `SELECT id, service_name, account_name, role_name, encrypted_secret, iv, algorithm, digits, period
        FROM totp_accounts
@@ -60,7 +110,7 @@ async function listAccounts(env) {
     });
   }
 
-  return json({ accounts, serverTime: Date.now() });
+  return json({ accounts, serverTime: Date.now(), offlineKey: await offlineKeyFor(env, user) });
 }
 
 async function createAccount(request, env, session) {
@@ -215,15 +265,11 @@ async function handleDiscordCallback(request, env) {
     return html("<h1>アクセスできません</h1><p>必要なDiscord権限が確認できませんでした。</p>", 403);
   }
 
-  const sessionPayload = {
-    id: user.id,
-    username: user.username,
-    globalName: user.global_name || "",
-    exp: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS,
-  };
-  const signedSession = await signJson(sessionPayload, env.SESSION_SECRET);
+  // Discord のログインだけでは 2段階認証は未完了 (mfa: false)。パスコードかパスキーの確認で mfa: true になる。
+  const appUser = await upsertUserOnLogin(env, user, request);
+  const session = buildSession({ id: user.id, username: user.username, globalName: user.global_name }, appUser, false);
   const headers = new Headers({ Location: "/" });
-  headers.append("Set-Cookie", cookie(COOKIE_SESSION, signedSession, url.protocol === "https:"));
+  headers.append("Set-Cookie", await sessionCookie(session, request, env));
   headers.append("Set-Cookie", clearCookie(COOKIE_OAUTH_STATE));
 
   return new Response(null, { status: 302, headers });
@@ -239,7 +285,7 @@ function logout() {
   });
 }
 
-function currentUser(session, env) {
+async function currentUser(request, session, user, env) {
   return json({
     authenticated: true,
     serverTime: Date.now(),
@@ -249,6 +295,7 @@ function currentUser(session, env) {
       globalName: session.globalName,
       canAddSecrets: canAddSecrets(session.id, env),
     },
+    security: await securitySummary(request, env, session, user),
   });
 }
 
@@ -334,9 +381,7 @@ async function decryptSecret(ciphertext, iv, env) {
 
 async function getVaultKey(env) {
   if (!env.VAULT_ENCRYPTION_KEY) throw new Error("VAULT_ENCRYPTION_KEY is required.");
-  const raw = /^[0-9a-f]{64}$/i.test(env.VAULT_ENCRYPTION_KEY)
-    ? hexToBytes(env.VAULT_ENCRYPTION_KEY)
-    : await sha256Bytes(env.VAULT_ENCRYPTION_KEY);
+  const raw = await getVaultRaw(env);
   return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
@@ -426,133 +471,4 @@ function base32ToBytes(secret) {
     bytes.push(Number.parseInt(bits.slice(i, i + 8), 2));
   }
   return new Uint8Array(bytes);
-}
-
-async function signJson(payload, secret) {
-  return signValue(base64UrlEncode(new TextEncoder().encode(JSON.stringify(payload))), secret);
-}
-
-async function verifySignedJson(value, secret) {
-  const payload = await verifySignedValue(value, secret);
-  if (!payload) return null;
-  try {
-    return JSON.parse(new TextDecoder().decode(base64UrlDecode(payload)));
-  } catch (error) {
-    return null;
-  }
-}
-
-async function signValue(value, secret) {
-  const signature = await hmacSha256(value, secret);
-  return `${value}.${base64UrlEncode(signature)}`;
-}
-
-async function verifySignedValue(value, secret) {
-  const [payload, signature] = value.split(".");
-  if (!payload || !signature) return "";
-  const expected = base64UrlEncode(await hmacSha256(payload, secret));
-  return timingSafeEqual(signature, expected) ? payload : "";
-}
-
-async function hmacSha256(value, secret) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)));
-}
-
-async function sha256Bytes(value) {
-  return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
-}
-
-function cookie(name, value, secure, maxAge = SESSION_MAX_AGE_SECONDS) {
-  return `${name}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge};${secure ? " Secure;" : ""}`;
-}
-
-function clearCookie(name) {
-  return `${name}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
-}
-
-function parseCookies(header) {
-  const cookies = {};
-  for (const part of header.split(";")) {
-    const [key, ...valueParts] = part.trim().split("=");
-    const value = valueParts.join("=");
-    if (key && value) cookies[key] = value;
-  }
-  return cookies;
-}
-
-function canAddSecrets(userId, env) {
-  const managers = parseCsv(env.DISCORD_SECRET_MANAGER_USER_IDS || "");
-  if (managers.size > 0) return managers.has(userId);
-  return parseCsv(env.DISCORD_ALLOWED_USER_IDS || "").has(userId);
-}
-
-function parseCsv(value) {
-  return new Set(
-    value
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean),
-  );
-}
-
-function assertDiscordConfig(env) {
-  if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) {
-    throw new Error("Discord OAuth is not configured.");
-  }
-}
-
-function json(payload, status = 200) {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-  });
-}
-
-function html(markup, status = 200) {
-  return new Response(markup, {
-    status,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
-  });
-}
-
-function toBytes(value) {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  return new Uint8Array(value);
-}
-
-function hexToBytes(hex) {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function base64UrlEncode(bytes) {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function base64UrlDecode(value) {
-  const base64 = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
-  const binary = atob(base64);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
-}
-
-function timingSafeEqual(left, right) {
-  if (left.length !== right.length) return false;
-  let result = 0;
-  for (let i = 0; i < left.length; i += 1) {
-    result |= left.charCodeAt(i) ^ right.charCodeAt(i);
-  }
-  return result === 0;
 }

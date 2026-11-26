@@ -35,6 +35,10 @@
               <input id="searchInput" type="search" placeholder="サービス、アカウント、ロール">
             </label>
             <button id="lockButton" type="button" class="secondary">ログアウト</button>
+            <div class="toolbar-row">
+              <button id="settingsButton" type="button" class="secondary">セキュリティ設定</button>
+              <button id="adminButton" type="button" class="secondary hidden">利用者の管理</button>
+            </div>
           </div>
 
           <div class="accounts-header">
@@ -161,6 +165,77 @@
         </section>
       </section>
     </main>
+
+    <div id="securityGate" class="gate hidden" role="dialog" aria-modal="true" aria-labelledby="gateTitle">
+      <div class="gate-card">
+        <img class="gate-logo" src="/icons/icon-192.png" alt="" width="56" height="56">
+        <h2 id="gateTitle">確認しています</h2>
+        <p id="gateMessage" class="gate-message"></p>
+        <div id="gateBody" class="gate-body"></div>
+        <p id="gateError" class="gate-error" role="alert" aria-live="assertive"></p>
+        <div class="gate-footer">
+          <span id="gateUser"></span>
+          <a href="/logout" id="gateLogout">別のアカウントでログイン</a>
+        </div>
+      </div>
+    </div>
+
+    <dialog id="settingsDialog" class="sheet" aria-labelledby="settingsTitle">
+      <div class="sheet-head">
+        <h2 id="settingsTitle">セキュリティ設定</h2>
+        <button type="button" class="secondary" data-close>閉じる</button>
+      </div>
+
+      <section class="sheet-section">
+        <h3>開いたときのロック</h3>
+        <label class="check-row">
+          <input id="unlockOnOpenToggle" type="checkbox">
+          <span>アプリやページを開くたびに、パスキーかパスコードを求める</span>
+        </label>
+        <p class="hint">オンのときは、オフラインで開いてもパスコードで解除します。</p>
+        <p id="unlockOnOpenStatus" class="status-line" aria-live="polite"></p>
+      </section>
+
+      <section class="sheet-section">
+        <h3>パスキー</h3>
+        <ul id="passkeyList" class="item-list"></ul>
+        <button id="addPasskeyButton" type="button" class="secondary">パスキーを追加</button>
+        <p id="passkeyStatus" class="status-line" aria-live="polite"></p>
+      </section>
+
+      <section class="sheet-section">
+        <h3>パスコードを変更</h3>
+        <form id="passcodeChangeForm" class="stack compact">
+          <label>
+            <span>今のパスコード</span>
+            <input id="currentPasscodeInput" type="password" inputmode="numeric" autocomplete="off" maxlength="6" required>
+          </label>
+          <label>
+            <span>新しいパスコード（4桁か6桁）</span>
+            <input id="newPasscodeInput" type="password" inputmode="numeric" autocomplete="off" maxlength="6" required>
+          </label>
+          <label>
+            <span>新しいパスコード（確認）</span>
+            <input id="confirmPasscodeInput" type="password" inputmode="numeric" autocomplete="off" maxlength="6" required>
+          </label>
+          <button type="submit">変更する</button>
+        </form>
+        <p id="passcodeChangeStatus" class="status-line" aria-live="polite"></p>
+      </section>
+    </dialog>
+
+    <dialog id="adminDialog" class="sheet sheet-wide" aria-labelledby="adminTitle">
+      <div class="sheet-head">
+        <h2 id="adminTitle">利用者の管理</h2>
+        <div class="sheet-actions">
+          <button id="adminReloadButton" type="button" class="secondary">更新</button>
+          <button type="button" class="secondary" data-close>閉じる</button>
+        </div>
+      </div>
+      <p class="hint">PhosMFA にログインしたことのある Discord アカウントです。ロックされたアカウントは、ここで解除するまで使えません。</p>
+      <p id="adminStatus" class="status-line" aria-live="polite"></p>
+      <div id="adminUserList" class="admin-list"></div>
+    </dialog>
 
     <template id="accountTemplate">
       <button class="account-item" type="button">
