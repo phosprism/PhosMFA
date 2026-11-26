@@ -178,38 +178,15 @@
         <div class="pv-head">
           <div>
             <h2 id="passwordTitle">パスワード管理</h2>
-            <p class="hint">テスト中のため、管理者にだけ表示しています。</p>
+            <p class="hint">テスト中のため、管理者にだけ表示しています。ID とパスワードは、サーバーの秘密鍵で暗号化して保存します。</p>
           </div>
           <div class="sheet-actions">
-            <button id="vaultLockButton" type="button" class="secondary hidden">ロック</button>
             <button id="passwordBackButton" type="button" class="secondary">認証コードに戻る</button>
           </div>
         </div>
         <p id="passwordStatus" class="status-line" aria-live="polite"></p>
 
-        <form id="vaultSetupForm" class="stack pv-narrow hidden">
-          <p class="notice">チームで共有するマスターパスワードを決めてください。ID とパスワードは、マスターパスワードから作った鍵でブラウザの中で暗号化してから保存します。サーバーには暗号化したデータしか送りません。マスターパスワードを忘れると、誰も中身を読めなくなります。</p>
-          <label>
-            <span>マスターパスワード（12文字以上）</span>
-            <input id="vaultNewInput" type="password" autocomplete="new-password" minlength="12" required>
-          </label>
-          <label>
-            <span>マスターパスワード（確認）</span>
-            <input id="vaultConfirmInput" type="password" autocomplete="new-password" minlength="12" required>
-          </label>
-          <button type="submit">この内容で始める</button>
-        </form>
-
-        <form id="vaultUnlockForm" class="stack pv-narrow hidden">
-          <p class="hint">マスターパスワードを入力すると、保存した ID とパスワードを表示します。</p>
-          <label>
-            <span>マスターパスワード</span>
-            <input id="vaultUnlockInput" type="password" autocomplete="current-password" required>
-          </label>
-          <button type="submit">開く</button>
-        </form>
-
-        <div id="vaultContent" class="pv-content hidden">
+        <div id="vaultContent" class="pv-content">
           <div class="pv-toolbar">
             <label class="search">
               <span>検索</span>

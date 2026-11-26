@@ -7,7 +7,7 @@ const CACHE_KEY_ID = "account-cache-key-v1";
 const CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v2");
 const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
 const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
-const SERVICE_WORKER_CACHE = "phos-mfa-v28";
+const SERVICE_WORKER_CACHE = "phos-mfa-v29";
 // 開いたときのロックが有効な人のオフライン用キャッシュ (v3)。サーバーからもらう鍵 K で暗号化し、
 // K はパスコードから PBKDF2 で作った鍵で包んで保存する。パスコードを知らないと開けない。
 const OFFLINE_WRAP_KEY = "phos-mfa.offline-wrap.v1";
@@ -33,8 +33,8 @@ const state = {
   syncing: false,
   me: null,
   isAdmin: false,
-  // パスワード管理。鍵はこのページのメモリにだけ置き、再読み込みやロックで消える
-  vault: { meta: null, key: null, entries: [], editingId: 0, revealed: new Set(), busy: false },
+  // パスワード管理。復号した内容は、パスワード管理の画面を開いている間だけメモリに置く
+  vault: { entries: [], editingId: 0, revealed: new Set() },
   // 開いたときのロックを解除した証明。メモリにだけ置くので、再読み込みやアプリの再起動で消える。
   unlockToken: "",
   // オフライン用の鍵をパスコードで包むために、確認直後だけ一時的に持つ
@@ -137,12 +137,6 @@ const els = {
   passwordView: document.querySelector("#passwordView"),
   passwordStatus: document.querySelector("#passwordStatus"),
   passwordBackButton: document.querySelector("#passwordBackButton"),
-  vaultLockButton: document.querySelector("#vaultLockButton"),
-  vaultSetupForm: document.querySelector("#vaultSetupForm"),
-  vaultNewInput: document.querySelector("#vaultNewInput"),
-  vaultConfirmInput: document.querySelector("#vaultConfirmInput"),
-  vaultUnlockForm: document.querySelector("#vaultUnlockForm"),
-  vaultUnlockInput: document.querySelector("#vaultUnlockInput"),
   vaultContent: document.querySelector("#vaultContent"),
   passwordSearchInput: document.querySelector("#passwordSearchInput"),
   passwordAddButton: document.querySelector("#passwordAddButton"),
@@ -2259,7 +2253,6 @@ const EVENT_LABELS = {
   admin_reset: "管理者が2段階認証をリセット",
   admin_visibility: "管理者が、表示するアカウントを変更",
   admin_reorder: "管理者がアカウントの並び順を変更",
-  password_vault_created: "パスワード管理のマスターパスワードを設定",
   password_entry_created: "パスワードを追加",
   password_entry_updated: "パスワードを編集",
   password_entry_deleted: "パスワードを削除",
@@ -2634,8 +2627,8 @@ function syncGateScrollLock() {
   const update = () => {
     const gateOpen = !els.gate.classList.contains("hidden");
     document.documentElement.classList.toggle("gate-open", gateOpen);
-    // 本人確認をやり直すときは、パスワード管理もロックする
-    if (gateOpen && state.vault.key) lockVault();
+    // 本人確認をやり直すときは、表示中のパスワードも消す
+    if (gateOpen && state.vault.entries.length) clearVault();
     document.documentElement.classList.toggle("modal-open", dialogs.some((dialog) => dialog.open));
   };
   const observer = new MutationObserver(update);
@@ -2649,11 +2642,9 @@ function syncGateScrollLock() {
 
 // ===========================================================================
 // パスワード管理 (テスト中・管理者だけ)
-// マスターパスワード → PBKDF2-SHA256 (60万回) → AES-256-GCM。暗号化・復号はブラウザの中だけで行う
+// 暗号化・復号はサーバーで行う (サーバーの秘密鍵 → PBKDF2-SHA256 60万回 → AES-256-GCM)
 // ===========================================================================
 
-const VAULT_ITERATIONS = 600_000;
-const VAULT_VERIFIER = "PhosMFA password vault v1";
 const PASSWORD_HASH = "#passwords";
 
 els.passwordButton.addEventListener("click", () => {
@@ -2667,12 +2658,6 @@ els.passwordBackButton.addEventListener("click", () => {
   }, 150);
 });
 window.addEventListener("hashchange", applyView);
-els.vaultLockButton.addEventListener("click", () => {
-  lockVault();
-  renderVault();
-});
-els.vaultSetupForm.addEventListener("submit", setupVault);
-els.vaultUnlockForm.addEventListener("submit", unlockVault);
 els.passwordSearchInput.addEventListener("input", renderPasswordList);
 els.passwordAddButton.addEventListener("click", () => openPasswordDialog(null));
 els.passwordForm.addEventListener("submit", savePasswordEntry);
@@ -2705,7 +2690,7 @@ function applyView() {
   document.documentElement.classList.toggle("view-passwords", show);
   els.passwordView.classList.toggle("hidden", !show);
   if (!show) {
-    if (state.vault.key) lockVault();
+    clearVault();
     return;
   }
   window.scrollTo(0, 0);
@@ -2719,175 +2704,30 @@ function setPasswordStatus(message, { error = false } = {}) {
 
 async function loadVault() {
   if (state.offlineMode) {
-    state.vault.meta = null;
-    showVaultStage("none");
+    clearVault();
+    els.vaultContent.classList.add("hidden");
     setPasswordStatus("オフライン中はパスワード管理を使えません。オンラインに戻ってから開いてください。", { error: true });
     return;
   }
   const { response, data } = await api("/api/passwords");
   if (await handleAccessError(response, data)) return;
   if (!response.ok) {
-    showVaultStage("none");
+    clearVault();
+    els.vaultContent.classList.add("hidden");
     setPasswordStatus(response.status === 403 ? "パスワード管理は、管理者だけが使えます。" : "読み込めませんでした。時間をおいて開き直してください。", { error: true });
     return;
   }
-  state.vault.meta = data.vault;
-  state.vault.rawEntries = data.entries || [];
-  if (state.vault.key) await decryptVaultEntries();
-  renderVault();
-}
-
-function showVaultStage(stage) {
-  els.vaultSetupForm.classList.toggle("hidden", stage !== "setup");
-  els.vaultUnlockForm.classList.toggle("hidden", stage !== "unlock");
-  els.vaultContent.classList.toggle("hidden", stage !== "open");
-  els.vaultLockButton.classList.toggle("hidden", stage !== "open");
-}
-
-function renderVault() {
-  if (!state.vault.meta) {
-    showVaultStage("setup");
-    setPasswordStatus("");
-    return;
-  }
-  if (!state.vault.key) {
-    showVaultStage("unlock");
-    setPasswordStatus("");
-    window.setTimeout(() => {
-      if (usesKeyboardEntry()) els.vaultUnlockInput.focus();
-    }, 0);
-    return;
-  }
-  showVaultStage("open");
+  state.vault.entries = data.entries || [];
+  els.vaultContent.classList.remove("hidden");
+  if (els.passwordStatus.classList.contains("error")) setPasswordStatus("");
   renderPasswordList();
 }
 
-async function deriveVaultKey(masterPassword, saltBytes, iterations) {
-  const material = await crypto.subtle.importKey("raw", new TextEncoder().encode(masterPassword), "PBKDF2", false, ["deriveKey"]);
-  return crypto.subtle.deriveKey(
-    { name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations },
-    material,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"],
-  );
-}
-
-async function encryptWithVaultKey(key, text) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text)));
-  return { iv: bytesToBase64(iv), ciphertext: bytesToBase64(ciphertext) };
-}
-
-async function decryptWithVaultKey(key, iv, ciphertext) {
-  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(iv) }, key, base64ToBytes(ciphertext));
-  return new TextDecoder().decode(plain);
-}
-
-async function withVaultBusy(form, message, task) {
-  if (state.vault.busy) return;
-  state.vault.busy = true;
-  const submit = form.querySelector("button[type=submit]");
-  submit.disabled = true;
-  setPasswordStatus(message);
-  try {
-    await task();
-  } finally {
-    state.vault.busy = false;
-    submit.disabled = false;
-  }
-}
-
-async function setupVault(event) {
-  event.preventDefault();
-  const master = els.vaultNewInput.value;
-  if (master.length < 12) {
-    setPasswordStatus("マスターパスワードは12文字以上にしてください。", { error: true });
-    return;
-  }
-  if (master !== els.vaultConfirmInput.value) {
-    setPasswordStatus("確認用のマスターパスワードが一致しません。", { error: true });
-    return;
-  }
-
-  await withVaultBusy(els.vaultSetupForm, "鍵を作っています…", async () => {
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const key = await deriveVaultKey(master, salt, VAULT_ITERATIONS);
-    const verifier = await encryptWithVaultKey(key, VAULT_VERIFIER);
-    const { response, data } = await api("/api/passwords/vault", {
-      method: "POST",
-      body: { iterations: VAULT_ITERATIONS, salt: bytesToBase64(salt), verifierIv: verifier.iv, verifierCiphertext: verifier.ciphertext },
-    });
-    if (await handleAccessError(response, data)) return;
-    if (response.status === 409) {
-      // 先にほかの管理者が設定していた
-      els.vaultSetupForm.reset();
-      await loadVault();
-      setPasswordStatus("ほかの管理者がすでにマスターパスワードを設定していました。そのマスターパスワードで開いてください。", { error: true });
-      return;
-    }
-    if (!response.ok) {
-      setPasswordStatus("設定できませんでした。", { error: true });
-      return;
-    }
-    els.vaultSetupForm.reset();
-    state.vault.key = key;
-    await loadVault();
-    setPasswordStatus("マスターパスワードを設定しました。");
-  });
-}
-
-async function unlockVault(event) {
-  event.preventDefault();
-  const meta = state.vault.meta;
-  if (!meta) return;
-  const master = els.vaultUnlockInput.value;
-
-  await withVaultBusy(els.vaultUnlockForm, "確認しています…", async () => {
-    const key = await deriveVaultKey(master, base64ToBytes(meta.salt), meta.iterations);
-    try {
-      const check = await decryptWithVaultKey(key, meta.verifierIv, meta.verifierCiphertext);
-      if (check !== VAULT_VERIFIER) throw new Error("verifier mismatch");
-    } catch (error) {
-      setPasswordStatus("マスターパスワードが違います。", { error: true });
-      els.vaultUnlockInput.select();
-      return;
-    }
-    els.vaultUnlockForm.reset();
-    state.vault.key = key;
-    await decryptVaultEntries();
-    setPasswordStatus("");
-    renderVault();
-  });
-}
-
-function lockVault() {
-  state.vault.key = null;
+function clearVault() {
   state.vault.entries = [];
   state.vault.revealed.clear();
   els.passwordList.replaceChildren();
   if (els.passwordDialog.open) els.passwordDialog.close();
-}
-
-async function decryptVaultEntries() {
-  const entries = [];
-  for (const row of state.vault.rawEntries || []) {
-    try {
-      const data = JSON.parse(await decryptWithVaultKey(state.vault.key, row.iv, row.ciphertext));
-      entries.push({
-        id: row.id,
-        updatedAt: row.updatedAt,
-        title: String(data.title || ""),
-        url: String(data.url || ""),
-        username: String(data.username || ""),
-        password: String(data.password || ""),
-        note: String(data.note || ""),
-      });
-    } catch (error) {
-      entries.push({ id: row.id, updatedAt: row.updatedAt, broken: true });
-    }
-  }
-  state.vault.entries = entries;
 }
 
 function renderPasswordList() {
@@ -2914,7 +2754,7 @@ function renderPasswordCard(entry) {
   if (entry.broken) {
     item.classList.add("broken");
     const text = document.createElement("p");
-    text.textContent = `#${entry.id} の中身を読めませんでした。別のマスターパスワードで保存したか、データが壊れています。`;
+    text.textContent = `#${entry.id} の中身を読めませんでした。データが壊れているおそれがあります。`;
     item.append(text, pvButton("削除", "danger", () => deletePasswordEntry(entry)));
     return item;
   }
@@ -3011,7 +2851,6 @@ async function copyPasswordValue(value, label) {
 }
 
 function openPasswordDialog(entry) {
-  if (!state.vault.key) return;
   state.vault.editingId = entry?.id || 0;
   els.passwordForm.reset();
   els.passwordDialogTitle.textContent = entry ? "パスワードを編集" : "パスワードを追加";
@@ -3026,9 +2865,7 @@ function openPasswordDialog(entry) {
 
 async function savePasswordEntry(event) {
   event.preventDefault();
-  if (!state.vault.key) return;
   const entry = {
-    v: 1,
     title: els.pwTitleInput.value.trim(),
     url: els.pwUrlInput.value.trim(),
     username: els.pwUsernameInput.value,
@@ -3043,11 +2880,10 @@ async function savePasswordEntry(event) {
   const submit = els.passwordForm.querySelector("button[type=submit]");
   submit.disabled = true;
   try {
-    const encrypted = await encryptWithVaultKey(state.vault.key, JSON.stringify(entry));
     const id = state.vault.editingId;
     const { response, data } = await api(id ? `/api/passwords/${id}` : "/api/passwords", {
       method: id ? "PATCH" : "POST",
-      body: encrypted,
+      body: entry,
     });
     if (await handleAccessError(response, data)) {
       els.passwordDialog.close();
@@ -3055,7 +2891,7 @@ async function savePasswordEntry(event) {
     }
     if (!response.ok) {
       els.passwordDialogStatus.textContent =
-        data?.error === "not_found" ? "このパスワードは削除されています。" : data?.error === "invalid_entry" ? "内容が長すぎます。メモを短くしてください。" : "保存できませんでした。";
+        data?.error === "not_found" ? "このパスワードは削除されています。" : data?.error === "invalid_entry" ? "長すぎる項目があります。メモなどを短くしてください。" : "保存できませんでした。";
       return;
     }
     els.passwordDialog.close();
