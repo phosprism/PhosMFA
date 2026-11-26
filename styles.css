@@ -558,7 +558,7 @@ select:focus {
   inset: 0;
   justify-content: center;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior: none;
   padding: max(24px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
   position: fixed;
   z-index: 50;
@@ -1373,4 +1373,13 @@ button:disabled {
   .pin-desktop.focused .pin-box.current:not(.filled)::after {
     animation: none;
   }
+}
+
+/* パスコード画面を出している間は、後ろのページをスクロールさせない。
+   画面に収まらないときだけ、パスコード画面そのものがスクロールする (.gate の overflow-y: auto) */
+html.gate-open,
+html.gate-open body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
