@@ -1383,3 +1383,18 @@ html.gate-open body {
   overflow: hidden;
   overscroll-behavior: none;
 }
+
+/* 数字キーを素早く続けて押したときに、ダブルタップとみなされて拡大されないようにする。
+   2本指での拡大はそのまま使える */
+.gate,
+.pin-key,
+.pin-field {
+  touch-action: manipulation;
+}
+
+.pin-key {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
