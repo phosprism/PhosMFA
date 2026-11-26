@@ -7,7 +7,7 @@ const CACHE_KEY_ID = "account-cache-key-v1";
 const CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v2");
 const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
 const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
-const SERVICE_WORKER_CACHE = "phos-mfa-v13";
+const SERVICE_WORKER_CACHE = "phos-mfa-v15";
 // 開いたときのロックが有効な人のオフライン用キャッシュ (v3)。サーバーからもらう鍵 K で暗号化し、
 // K はパスコードから PBKDF2 で作った鍵で包んで保存する。パスコードを知らないと開けない。
 const OFFLINE_WRAP_KEY = "phos-mfa.offline-wrap.v1";
@@ -137,7 +137,7 @@ for (const dialog of [els.settingsDialog, els.adminDialog]) {
 els.secretForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.canAddSecrets) {
-    alert("このDiscordアカウントには追加権限がありません。");
+    alert("このDiscordアカウントには、シードを追加する権限がありません。");
     return;
   }
   if (state.offlineMode) {
@@ -201,7 +201,7 @@ els.copyTokenButton.addEventListener("click", async () => {
 
 els.deleteButton.addEventListener("click", async () => {
   if (!state.canAddSecrets) {
-    alert("このDiscordアカウントには削除権限がありません。");
+    alert("このDiscordアカウントには、シードを削除する権限がありません。");
     return;
   }
   if (state.offlineMode) {
@@ -582,7 +582,7 @@ function updateSyncStatus() {
   if (!els.syncStatus) return;
 
   if (state.offlineMode) {
-    els.syncStatus.textContent = "オフライン: 保存済みデータで生成中";
+    els.syncStatus.textContent = "オフライン: 保存したデータで認証コードを表示中";
     return;
   }
 
@@ -596,7 +596,7 @@ function updateSyncStatus() {
   const syncText = absolute <= 1
     ? "サーバー時刻と同期済み"
     : `サーバー時刻との差 ${drift > 0 ? "+" : ""}${drift}秒`;
-  els.syncStatus.textContent = state.offlineReady ? `${syncText} / PWA準備OK` : syncText;
+  els.syncStatus.textContent = state.offlineReady ? `${syncText} / オフラインでも使えます` : syncText;
 }
 
 function formatTime(timestamp) {
@@ -657,7 +657,7 @@ async function handleQrFile(event) {
 
 async function startQrCamera() {
   if (!navigator.mediaDevices?.getUserMedia) {
-    setQrStatus("このブラウザではカメラ読み取りを利用できません。QR画像を選択してください。");
+    setQrStatus("このブラウザではカメラでの読み取りを使えません。QR画像を選択してください。");
     return;
   }
 
@@ -1002,6 +1002,7 @@ async function runSecurityGate(initial) {
     if (!next) return new Promise(() => {});
     me = next;
   }
+  destroyActivePad();
   els.gate.classList.add("hidden");
   els.gateBody.replaceChildren();
   return me;
@@ -1031,50 +1032,68 @@ function renderLockedStage(security) {
 }
 
 function renderPasscodeSetupStage() {
-  setGate(
-    "パスコードを登録してください",
-    "Discord アカウントが乗っ取られても PhosMFA を開けないよう、2段階認証を設定します。まず、パスキーが使えない端末でも使えるパスコードを決めてください。",
-  );
+  const intro =
+    "Discord アカウントが乗っ取られても、それだけでは PhosMFA を開けないように、2段階認証を設定します。パスキーが使えない端末でも使えるパスコードを決めてください。";
 
   return new Promise((resolve) => {
-    const lengthGroup = choiceGroup("passcodeLength", [
-      { value: "6", label: "6桁（おすすめ）", checked: true },
-      { value: "4", label: "4桁" },
-    ]);
-    const first = passcodeInput("パスコード");
-    const second = passcodeInput("もう一度入力");
-    const submit = button("登録する", "submit");
-    const form = document.createElement("form");
-    form.className = "gate-body";
-    form.append(lengthGroup.element, first.label, second.label, hint("同じ数字の繰り返し（1111）や連番（1234）は使えません。"), submit);
+    let length = 6;
+    let first = "";
 
-    const applyLength = () => {
-      const length = Number(lengthGroup.value());
-      for (const input of [first.input, second.input]) {
-        input.maxLength = length;
-        input.value = input.value.slice(0, length);
-      }
-    };
-    lengthGroup.element.addEventListener("change", applyLength);
-    applyLength();
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const length = Number(lengthGroup.value());
-      const passcode = first.input.value;
-      if (!new RegExp(`^\\d{${length}}$`).test(passcode)) return setGateError(`${length}桁の数字で入力してください。`);
-      if (passcode !== second.input.value) return setGateError("2回の入力が一致しません。");
-
-      await busy(submit, async () => {
-        const { response, data } = await api("/api/mfa/passcode/setup", { method: "POST", body: { passcode } });
-        if (!response.ok) return setGateError(errorMessage(data));
-        acceptVerification(data, passcode);
-        resolve();
+    const showFirst = () => {
+      first = "";
+      setGate("パスコードを登録してください", intro);
+      const switcher = button(length === 6 ? "4桁のパスコードにする" : "6桁のパスコードにする", "button", "link-button");
+      switcher.addEventListener("click", () => {
+        length = length === 6 ? 4 : 6;
+        setGateError("");
+        showFirst();
       });
-    });
+      const pad = passcodePad({
+        length,
+        onComplete: async (code) => {
+          if (passcodeTooSimple(code)) {
+            setGateError("推測されやすい番号（同じ数字の繰り返しや連番）は使えません。");
+            return false;
+          }
+          setGateError("");
+          first = code;
+          showConfirm();
+          return true;
+        },
+      });
+      els.gateBody.replaceChildren(pad.element, switcher);
+    };
 
-    els.gateBody.replaceChildren(form);
-    first.input.focus();
+    const showConfirm = () => {
+      setGate("もう一度入力してください", "確認のため、同じパスコードをもう一度入力してください。");
+      const back = button("最初からやり直す", "button", "link-button");
+      back.addEventListener("click", () => {
+        setGateError("");
+        showFirst();
+      });
+      const pad = passcodePad({
+        length,
+        onComplete: async (code) => {
+          if (code !== first) {
+            setGateError("パスコードが一致しませんでした。最初から入力し直してください。");
+            window.setTimeout(showFirst, 450);
+            return false;
+          }
+          const { response, data } = await api("/api/mfa/passcode/setup", { method: "POST", body: { passcode: code } });
+          if (!response.ok) {
+            setGateError(errorMessage(data));
+            window.setTimeout(showFirst, 450);
+            return false;
+          }
+          acceptVerification(data, code);
+          resolve();
+          return true;
+        },
+      });
+      els.gateBody.replaceChildren(pad.element, back);
+    };
+
+    showFirst();
   });
 }
 
@@ -1130,58 +1149,58 @@ function renderUnlockChoiceStage() {
 
 function renderVerifyStage(security) {
   const unlocking = security.stage === "unlock";
+  const canUsePasskey = security.passkeyCount > 0 && passkeySupported();
   setGate(
-    unlocking ? "ロックを解除してください" : "2段階認証",
+    unlocking ? "パスコードを入力" : "2段階認証",
     unlocking
-      ? "パスキーかパスコードで本人確認をすると、認証コードを表示します。"
-      : "Discord でのログインを確認しました。続けて、登録したパスキーかパスコードで本人確認をしてください。",
+      ? canUsePasskey
+        ? "パスコードを入力するか、「パスキー」で本人確認をしてください。"
+        : "パスコードを入力すると、認証コードを表示します。"
+      : "Discord でのログインを確認しました。続けて、パスコードかパスキーで本人確認をしてください。",
   );
 
   return new Promise((resolve) => {
-    const nodes = [];
-    const canUsePasskey = security.passkeyCount > 0 && passkeySupported();
-    if (canUsePasskey) {
-      const passkeyButton = button("パスキーで確認");
-      passkeyButton.addEventListener("click", () =>
-        busy(passkeyButton, async () => {
-          const result = await authenticateWithPasskey();
-          if (result.ok) return resolve();
-          if (result.locked) return resolve();
-          if (result.message) setGateError(result.message);
-        }),
-      );
-      nodes.push(passkeyButton, divider("またはパスコード"));
-    }
+    const remaining = hint("");
+    const showRemaining = (count) => {
+      remaining.textContent = count < MAX_ATTEMPTS ? `あと${count}回失敗すると、アカウントがロックされます。` : "";
+    };
+    showRemaining(security.remainingAttempts);
 
-    const field = passcodeInput(`パスコード（${security.passcodeLength || "4〜6"}桁）`);
-    field.input.maxLength = security.passcodeLength || 6;
-    const submit = button("確認", "submit", canUsePasskey ? "secondary" : "");
-    const form = document.createElement("form");
-    form.className = "gate-body";
-    form.append(field.label, submit);
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const passcode = field.input.value;
-      if (!/^\d{4,6}$/.test(passcode)) return setGateError("パスコードを入力してください。");
-      await busy(submit, async () => {
+    const pad = passcodePad({
+      length: security.passcodeLength || null,
+      extraKey: canUsePasskey
+        ? {
+            label: "パスキー",
+            ariaLabel: "パスキーで本人確認",
+            onPress: async () => {
+              setGateError("");
+              const result = await authenticateWithPasskey();
+              if (result.ok || result.locked) return resolve();
+              if (result.message) setGateError(result.message);
+              if (Number.isFinite(result.remainingAttempts)) showRemaining(result.remainingAttempts);
+            },
+          }
+        : null,
+      onComplete: async (passcode) => {
         const { response, data } = await api("/api/mfa/passcode/verify", { method: "POST", body: { passcode } });
-        if (response.status === 423) return resolve();
-        if (!response.ok) {
-          field.input.value = "";
-          field.input.focus();
-          return setGateError(errorMessage(data));
+        if (response.status === 423) {
+          resolve();
+          return true;
         }
+        if (!response.ok) {
+          // 残り回数はキーの下に出すので、エラーは短く
+          setGateError(data.error === "invalid_passcode" ? "パスコードが違います。" : errorMessage(data));
+          if (Number.isFinite(data.remainingAttempts)) showRemaining(data.remainingAttempts);
+          return false;
+        }
+        setGateError("");
         acceptVerification(data, passcode);
         resolve();
-      });
+        return true;
+      },
     });
-    nodes.push(form);
-    if (security.remainingAttempts < MAX_ATTEMPTS) {
-      nodes.push(hint(`あと${security.remainingAttempts}回失敗すると、アカウントがロックされます。`));
-    }
 
-    els.gateBody.replaceChildren(...nodes);
-    if (!canUsePasskey) field.input.focus();
+    els.gateBody.replaceChildren(pad.element, remaining);
   });
 }
 
@@ -1213,7 +1232,7 @@ function errorMessage(data) {
     case "locked":
       return "アカウントがロックされています。管理者に連絡してください。";
     case "challenge_expired":
-      return "時間が経ちすぎました。もう一度お試しください。";
+      return "時間切れになりました。もう一度お試しください。";
     case "passkey_invalid":
       return "このパスキーは登録できませんでした。";
     case "passkey_already_registered":
@@ -1249,6 +1268,163 @@ function divider(text) {
   element.className = "divider";
   element.textContent = text;
   return element;
+}
+
+// スマホのロック画面のようなパスコード入力 (ドット + 数字キー)。
+// length が null のときは 4〜6桁で、「確定」キーで送る。
+let activePad = null;
+
+function passcodePad({ length, onComplete, extraKey = null }) {
+  destroyActivePad();
+  const maxLength = length || 6;
+  let value = "";
+  let busy = false;
+
+  const element = document.createElement("div");
+  element.className = "pin";
+
+  const dots = document.createElement("div");
+  dots.className = "pin-dots";
+  dots.setAttribute("aria-hidden", "true");
+  const dotCount = length || 6;
+  for (let i = 0; i < dotCount; i += 1) dots.append(Object.assign(document.createElement("span"), { className: "pin-dot" }));
+
+  const live = document.createElement("p");
+  live.className = "sr-only";
+  live.setAttribute("aria-live", "polite");
+
+  const keys = document.createElement("div");
+  keys.className = "pin-keys";
+  const letters = ["", "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ"];
+  const digitKey = (digit) => {
+    const key = button("", "button", "pin-key");
+    key.setAttribute("aria-label", String(digit));
+    key.append(Object.assign(document.createElement("span"), { textContent: String(digit) }));
+    key.append(Object.assign(document.createElement("small"), { textContent: letters[digit] || " " }));
+    key.addEventListener("click", () => press(String(digit)));
+    return key;
+  };
+  for (let digit = 1; digit <= 9; digit += 1) keys.append(digitKey(digit));
+
+  let okKey = null;
+  if (!length) {
+    okKey = button("確定", "button", "pin-key text");
+    okKey.addEventListener("click", submit);
+    keys.append(okKey);
+  } else if (extraKey) {
+    const key = button(extraKey.label, "button", "pin-key text");
+    key.setAttribute("aria-label", extraKey.ariaLabel || extraKey.label);
+    key.addEventListener("click", async () => {
+      if (busy) return;
+      setBusy(true);
+      try {
+        await extraKey.onPress();
+      } finally {
+        setBusy(false);
+      }
+    });
+    keys.append(key);
+  } else {
+    keys.append(Object.assign(document.createElement("span"), { className: "pin-key blank" }));
+  }
+  keys.append(digitKey(0));
+  const deleteKey = button("", "button", "pin-key text");
+  deleteKey.setAttribute("aria-label", "1文字消す");
+  deleteKey.innerHTML =
+    '<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M9 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6-7 6-7z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m12 9.5 5 5m0-5-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  deleteKey.addEventListener("click", () => {
+    if (busy) return;
+    value = value.slice(0, -1);
+    render();
+  });
+  keys.append(deleteKey);
+
+  element.append(dots, live, keys);
+  dots.addEventListener("animationend", () => element.classList.remove("shake"));
+
+  function render() {
+    [...dots.children].forEach((dot, i) => dot.classList.toggle("filled", i < value.length));
+    live.textContent = `${value.length}桁 入力済み`;
+    if (okKey) okKey.disabled = busy || value.length < 4;
+  }
+
+  function setBusy(next) {
+    busy = next;
+    element.classList.toggle("busy", next);
+    for (const key of keys.querySelectorAll("button")) key.disabled = next;
+    render();
+  }
+
+  function press(digit) {
+    if (busy || value.length >= maxLength) return;
+    value += digit;
+    render();
+    if (length && value.length === length) submit();
+  }
+
+  async function submit() {
+    if (busy || value.length < 4) return;
+    const code = value;
+    setBusy(true);
+    let ok = false;
+    try {
+      ok = await onComplete(code);
+    } catch (error) {
+      setGateError("通信できませんでした。接続を確認して、もう一度お試しください。");
+    }
+    if (activePad !== controller) return;
+    setBusy(false);
+    if (!ok) {
+      value = "";
+      render();
+      element.classList.remove("shake");
+      void element.offsetWidth;
+      element.classList.add("shake");
+      if (navigator.vibrate) navigator.vibrate(120);
+    }
+  }
+
+  const onKeyDown = (event) => {
+    if (event.target.closest?.("dialog") || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (/^\d$/.test(event.key)) {
+      event.preventDefault();
+      press(event.key);
+    } else if (event.key === "Backspace") {
+      event.preventDefault();
+      if (!busy) {
+        value = value.slice(0, -1);
+        render();
+      }
+    } else if (event.key === "Enter" && !length) {
+      event.preventDefault();
+      submit();
+    }
+  };
+  document.addEventListener("keydown", onKeyDown);
+
+  const controller = {
+    element,
+    destroy() {
+      document.removeEventListener("keydown", onKeyDown);
+    },
+  };
+  activePad = controller;
+  render();
+  return controller;
+}
+
+function destroyActivePad() {
+  if (activePad) activePad.destroy();
+  activePad = null;
+}
+
+// サーバーと同じ基準 (同じ数字の繰り返し・連番は不可)
+function passcodeTooSimple(passcode) {
+  if (/^(\d)\1+$/.test(passcode)) return true;
+  const digits = [...passcode].map(Number);
+  const ascending = digits.every((digit, i) => i === 0 || digit === (digits[i - 1] + 1) % 10);
+  const descending = digits.every((digit, i) => i === 0 || digit === (digits[i - 1] + 9) % 10);
+  return ascending || descending;
 }
 
 function passcodeInput(labelText) {
@@ -1377,7 +1553,9 @@ async function authenticateWithPasskey() {
   };
   const result = await api("/api/mfa/passkey/auth", { method: "POST", body });
   if (result.response.status === 423) return { ok: false, locked: true };
-  if (!result.response.ok) return { ok: false, message: errorMessage(result.data) };
+  if (!result.response.ok) {
+    return { ok: false, message: errorMessage(result.data), remainingAttempts: result.data.remainingAttempts };
+  }
   acceptVerification(result.data);
   return { ok: true };
 }
@@ -1439,7 +1617,14 @@ async function cacheAccountsWithPasscode(payload, offlineKey) {
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const wrappingKey = await passcodeKey(state.pendingPasscode, salt, ["encrypt"]);
       const wrapped = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, wrappingKey, rawKey);
-      wrap = { v: 1, kid, salt: bytesToBase64(salt), iv: bytesToBase64(iv), data: bytesToBase64(new Uint8Array(wrapped)) };
+      wrap = {
+        v: 1,
+        kid,
+        len: state.pendingPasscode.length,
+        salt: bytesToBase64(salt),
+        iv: bytesToBase64(iv),
+        data: bytesToBase64(new Uint8Array(wrapped)),
+      };
       localStorage.setItem(OFFLINE_WRAP_KEY, JSON.stringify(wrap));
       localStorage.removeItem(OFFLINE_FAILURES_KEY);
       forgetPendingPasscode();
@@ -1480,17 +1665,11 @@ function unlockOfflineCache(stored) {
   els.workspace.classList.add("hidden");
   els.gate.classList.remove("hidden");
   els.gateUser.textContent = "オフライン";
-  setGate("ロックを解除してください", "オフラインのため、この端末に保存したデータをパスコードで開きます。パスキーはオフラインでは使えません。");
+  setGate("パスコードを入力", "オフラインのため、この端末に保存したデータをパスコードで開きます。パスキーはオフラインでは使えません。");
   setGateError("");
 
   return new Promise((resolve) => {
-    const field = passcodeInput("パスコード");
-    const submit = button("解除", "submit");
-    const form = document.createElement("form");
-    form.className = "gate-body";
     const remainingHint = hint("");
-    form.append(field.label, submit, remainingHint);
-
     const showRemaining = () => {
       const failures = Number(localStorage.getItem(OFFLINE_FAILURES_KEY) || 0);
       remainingHint.textContent =
@@ -1498,44 +1677,42 @@ function unlockOfflineCache(stored) {
     };
     showRemaining();
 
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const passcode = field.input.value;
-      if (!/^\d{4,6}$/.test(passcode)) return setGateError("パスコードを入力してください。");
-      submit.disabled = true;
-      try {
-        const wrappingKey = await passcodeKey(passcode, base64ToBytes(wrap.salt), ["decrypt"]);
-        const rawKey = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(wrap.iv) }, wrappingKey, base64ToBytes(wrap.data));
-        const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"]);
-        const plain = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: base64ToBytes(stored.iv), additionalData: OFFLINE_CACHE_AAD },
-          key,
-          base64ToBytes(stored.data),
-        );
-        localStorage.removeItem(OFFLINE_FAILURES_KEY);
-        const parsed = JSON.parse(new TextDecoder().decode(plain));
-        els.gate.classList.add("hidden");
-        resolve(Array.isArray(parsed) ? parsed.filter((account) => account.secret) : []);
-      } catch (error) {
-        const failures = Number(localStorage.getItem(OFFLINE_FAILURES_KEY) || 0) + 1;
-        if (failures >= MAX_ATTEMPTS) {
-          await clearAccountCache();
-          setGate("データを消去しました", `パスコードを${MAX_ATTEMPTS}回間違えたため、この端末に保存したデータを消去しました。オンラインに戻ってからログインしてください。`);
-          els.gateBody.replaceChildren();
-          setGateError("");
-          return;
+    const pad = passcodePad({
+      length: wrap.len || null,
+      onComplete: async (passcode) => {
+        try {
+          const wrappingKey = await passcodeKey(passcode, base64ToBytes(wrap.salt), ["decrypt"]);
+          const rawKey = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(wrap.iv) }, wrappingKey, base64ToBytes(wrap.data));
+          const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"]);
+          const plain = await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: base64ToBytes(stored.iv), additionalData: OFFLINE_CACHE_AAD },
+            key,
+            base64ToBytes(stored.data),
+          );
+          localStorage.removeItem(OFFLINE_FAILURES_KEY);
+          const parsed = JSON.parse(new TextDecoder().decode(plain));
+          els.gate.classList.add("hidden");
+          resolve(Array.isArray(parsed) ? parsed.filter((account) => account.secret) : []);
+          return true;
+        } catch (error) {
+          const failures = Number(localStorage.getItem(OFFLINE_FAILURES_KEY) || 0) + 1;
+          if (failures >= MAX_ATTEMPTS) {
+            await clearAccountCache();
+            setGate("データを消去しました", `パスコードを${MAX_ATTEMPTS}回間違えたため、この端末に保存したデータを消去しました。オンラインに戻ってからログインしてください。`);
+            destroyActivePad();
+            els.gateBody.replaceChildren();
+            setGateError("");
+            return true;
+          }
+          localStorage.setItem(OFFLINE_FAILURES_KEY, String(failures));
+          setGateError("パスコードが違います。");
+          showRemaining();
+          return false;
         }
-        localStorage.setItem(OFFLINE_FAILURES_KEY, String(failures));
-        field.input.value = "";
-        setGateError("パスコードが違います。");
-        showRemaining();
-      } finally {
-        submit.disabled = false;
-      }
+      },
     });
 
-    els.gateBody.replaceChildren(form);
-    field.input.focus();
+    els.gateBody.replaceChildren(pad.element, remainingHint);
   });
 }
 
@@ -1584,7 +1761,7 @@ async function updateUnlockOnOpen() {
     setStatus(
       els.unlockOnOpenStatus,
       value
-        ? "オンにしました。オフラインでも使うには、この端末で一度パスコードを入力してください（次回の解除時）。"
+        ? "オンにしました。オフラインでも使うには、次にロックを解除するときに、この端末でパスコードを入力してください。"
         : "オフにしました。",
     );
     state.lastSyncAt = 0;
@@ -1705,7 +1882,7 @@ const EVENT_LABELS = {
   passcode_changed: "パスコードを変更",
   verified: "本人確認に成功",
   passcode_failed: "パスコードを間違えた",
-  passcode_change_failed: "パスコード変更で間違えた",
+  passcode_change_failed: "パスコードの変更で、今のパスコードを間違えた",
   passkey_failed: "パスキーの確認に失敗",
   passkey_added: "パスキーを追加",
   passkey_removed: "パスキーを削除",
@@ -1810,7 +1987,7 @@ function renderAdminUser(user) {
     action(
       "2段階認証をリセット",
       "reset",
-      `${displayName} のパスコードとパスキーを削除し、ログイン中のセッションも無効にします。次のログインで登録し直しになります。よろしいですか？`,
+      `${displayName} のパスコードとパスキーを削除し、ログイン中のセッションも無効にします。次にログインするときに、登録し直す必要があります。よろしいですか？`,
     );
   }
   if (!user.lockedAt && !isSelf) {
@@ -1843,7 +2020,7 @@ function renderAdminUser(user) {
       const time = document.createElement("time");
       time.textContent = formatDate(event.createdAt);
       const text = document.createElement("span");
-      const detail = event.detail ? `（${event.detail}）` : "";
+      const detail = event.detail ? `（${eventDetailLabel(event.detail)}）` : "";
       const where = [event.ip, event.country].filter(Boolean).join(" / ");
       text.textContent = `${EVENT_LABELS[event.event] || event.event}${detail}${where ? ` — ${where}` : ""}`;
       item.append(time, text);
@@ -1853,6 +2030,24 @@ function renderAdminUser(user) {
 
   card.append(head, facts, actions, events);
   return card;
+}
+
+const EVENT_DETAIL_LABELS = {
+  too_many_attempts: `${MAX_ATTEMPTS}回失敗`,
+  admin: "管理者",
+  on: "オン",
+  off: "オフ",
+  passcode: "パスコード",
+  passkey: "パスキー",
+};
+
+// パスキーの検証で失敗した理由 (signature_invalid など) は管理者向けにまとめて表示する
+function eventDetailLabel(detail) {
+  if (!detail) return "";
+  if (EVENT_DETAIL_LABELS[detail]) return EVENT_DETAIL_LABELS[detail];
+  if (/^\d+\/\d+$/.test(detail)) return `${detail.split("/")[0]}回目`;
+  if (/^[a-z_]+$/.test(detail)) return "検証エラー";
+  return detail;
 }
 
 // D1 の CURRENT_TIMESTAMP は UTC の "YYYY-MM-DD HH:MM:SS"
