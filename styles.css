@@ -552,15 +552,21 @@ select:focus {
 }
 
 .gate {
-  align-items: center;
+  align-items: flex-start;
   background: var(--bg);
   display: flex;
   inset: 0;
   justify-content: center;
   overflow-y: auto;
-  padding: 24px 16px;
+  overscroll-behavior: contain;
+  padding: max(24px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
   position: fixed;
   z-index: 50;
+}
+
+/* 画面に余裕があるときだけ中央に置く。はみ出すときは上から並び、スクロールで下まで見られる */
+.gate > .gate-card {
+  margin: auto 0;
 }
 
 .gate-card {
@@ -1007,9 +1013,10 @@ button:disabled {
 }
 
 .pin-keys {
+  --pin-key: 74px;
   display: grid;
-  gap: 14px 26px;
-  grid-template-columns: repeat(3, 74px);
+  gap: calc(var(--pin-key) * 0.19) calc(var(--pin-key) * 0.35);
+  grid-template-columns: repeat(3, var(--pin-key));
 }
 
 .pin-key {
@@ -1019,12 +1026,12 @@ button:disabled {
   color: var(--ink);
   display: grid;
   gap: 1px;
-  height: 74px;
+  height: var(--pin-key);
   justify-items: center;
   line-height: 1;
   padding: 0;
   transition: background-color 0.1s ease;
-  width: 74px;
+  width: var(--pin-key);
 }
 
 .pin-key span {
@@ -1094,15 +1101,49 @@ button:disabled {
   }
 }
 
-@media (max-width: 380px) {
-  .pin-keys {
-    gap: 12px 20px;
-    grid-template-columns: repeat(3, 66px);
+/* スマホ: 枠を外して画面いっぱいに使い、キーの大きさを画面の高さに合わせる */
+@media (max-width: 520px) {
+  .gate {
+    background: var(--panel);
+    padding: max(12px, env(safe-area-inset-top)) 12px max(16px, env(safe-area-inset-bottom));
   }
 
-  .pin-key {
-    height: 66px;
-    width: 66px;
+  .gate-card {
+    border: 0;
+    box-shadow: none;
+    gap: 12px;
+    padding: 8px 8px 0;
+  }
+
+  .gate-logo {
+    border-radius: 10px;
+    height: 40px;
+    width: 40px;
+  }
+
+  .gate-card h2 {
+    font-size: 1.12rem;
+  }
+
+  .gate-message {
+    font-size: 0.88rem;
+    line-height: 1.6;
+  }
+
+  .pin {
+    gap: clamp(12px, 2.6svh, 24px);
+  }
+
+  .pin-keys {
+    --pin-key: clamp(54px, 9.2svh, 74px);
+  }
+
+  .pin-key span {
+    font-size: calc(var(--pin-key) * 0.38);
+  }
+
+  .gate-footer {
+    padding-top: 10px;
   }
 }
 
