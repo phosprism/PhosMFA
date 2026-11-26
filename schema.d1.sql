@@ -84,13 +84,13 @@ CREATE TABLE IF NOT EXISTS account_visibility (
   PRIMARY KEY (discord_id, account_id)
 );
 
--- マスターパスワードから鍵を作るための設定。1行だけ持つ
+-- サーバーの秘密鍵から鍵を作るための設定 (salt・回数)。1行だけ持つ
 CREATE TABLE IF NOT EXISTS password_vault (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   kdf TEXT NOT NULL DEFAULT 'PBKDF2-SHA256',
   iterations INTEGER NOT NULL,
   salt TEXT NOT NULL,                 -- base64 (16バイト)
-  verifier_iv TEXT NOT NULL,          -- マスターパスワードが合っているかを確かめるための暗号文
+  verifier_iv TEXT NOT NULL,          -- 秘密鍵が変わっていないかを確かめるための暗号文
   verifier_ciphertext TEXT NOT NULL,
   created_by_discord_id TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

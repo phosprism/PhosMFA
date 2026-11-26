@@ -1,14 +1,14 @@
 -- パスワード管理 (テスト中・管理者だけ)。
--- ID・パスワードはブラウザの中で暗号化してから送るので、ここには暗号文しか入らない。
--- 鍵: チームで共有するマスターパスワード → PBKDF2-SHA256 (60万回) → AES-256-GCM
+-- ID・パスワードはサーバーで暗号化してから保存するので、ここには暗号文しか入らない。
+-- 鍵: サーバーの秘密鍵 → PBKDF2-SHA256 (10万回) → AES-256-GCM
 
--- マスターパスワードから鍵を作るための設定。1行だけ持つ
+-- サーバーの秘密鍵から鍵を作るための設定 (salt・回数)。1行だけ持つ
 CREATE TABLE IF NOT EXISTS password_vault (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   kdf TEXT NOT NULL DEFAULT 'PBKDF2-SHA256',
   iterations INTEGER NOT NULL,
   salt TEXT NOT NULL,                 -- base64 (16バイト)
-  verifier_iv TEXT NOT NULL,          -- マスターパスワードが合っているかを確かめるための暗号文
+  verifier_iv TEXT NOT NULL,          -- 秘密鍵が変わっていないかを確かめるための暗号文
   verifier_ciphertext TEXT NOT NULL,
   created_by_discord_id TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

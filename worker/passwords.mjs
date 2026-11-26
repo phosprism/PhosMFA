@@ -1,16 +1,17 @@
 // パスワード管理 (テスト中のため管理者だけ)。
-// 鍵: サーバーの秘密鍵 (VAULT_ENCRYPTION_KEY) → PBKDF2-SHA256 (60万回) → AES-256-GCM。
+// 鍵: サーバーの秘密鍵 (VAULT_ENCRYPTION_KEY) → PBKDF2-SHA256 (10万回) → AES-256-GCM。
 // 名前・URL・ID・パスワード・メモをまとめて JSON にし、暗号化してから D1 に保存する。
 // D1 だけが漏れても、秘密鍵がなければ中身は読めない。
 import { canAddSecrets, getVaultRaw, hmacSha256Bytes, json } from "./util.mjs";
 import { logEvent } from "./security.mjs";
 
-export const PASSWORD_KDF_ITERATIONS = 600000;
+// Cloudflare Workers の本番では PBKDF2 は10万回までしか使えない
+export const PASSWORD_KDF_ITERATIONS = 100000;
 const KDF_NAME = "PBKDF2-SHA256-SERVER";
 const VERIFIER = "PhosMFA password vault v1";
 const LIMITS = { title: 200, url: 2000, username: 500, password: 1000, note: 4000 };
 
-// 60万回の計算は重いので、作った鍵は Worker のメモリに置いて使い回す (salt ごと)
+// 鍵を作る計算は重いので、作った鍵は Worker のメモリに置いて使い回す (salt ごと)
 const keyCache = new Map();
 
 export async function handlePasswordsApi(request, env, session, path) {
