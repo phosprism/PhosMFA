@@ -310,6 +310,12 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.meta-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
 .danger {
   background: #fff0f0;
   color: var(--danger);

@@ -66,7 +66,10 @@
                 <h2 id="selectedService"></h2>
                 <p id="selectedAccount"></p>
               </div>
-              <button id="deleteButton" type="button" class="danger">削除</button>
+              <div class="meta-actions">
+                <button id="editButton" type="button" class="secondary">編集</button>
+                <button id="deleteButton" type="button" class="danger">削除</button>
+              </div>
             </div>
 
             <button id="copyTokenButton" class="token-button" type="button">
@@ -256,6 +259,62 @@
           <button id="adminOrderSaveButton" type="button" disabled>並び順を保存</button>
           <button id="adminOrderResetButton" type="button" class="secondary" disabled>元に戻す</button>
         </div>
+      </section>
+    </dialog>
+
+    <dialog id="editDialog" class="sheet" aria-labelledby="editTitle">
+      <div class="sheet-head">
+        <h2 id="editTitle">アカウントを編集</h2>
+        <button type="button" class="secondary" data-close>閉じる</button>
+      </div>
+      <section class="sheet-section">
+      <form id="editForm" class="stack compact">
+        <label>
+          <span>サービス名</span>
+          <input id="editServiceInput" type="text" required>
+        </label>
+        <label>
+          <span>アカウント</span>
+          <input id="editAccountInput" type="text" required>
+        </label>
+        <label>
+          <span>ロール / チーム</span>
+          <input id="editRoleInput" type="text">
+        </label>
+        <label>
+          <span>新しいシードまたは otpauth URI</span>
+          <textarea id="editSecretInput" rows="3" spellcheck="false" placeholder="シードを変えるときだけ入力"></textarea>
+        </label>
+        <p class="hint">空のままにすると、今のシードをそのまま使います。</p>
+        <div class="otp-options-grid">
+          <label>
+            <span>アルゴリズム</span>
+            <select id="editAlgorithmInput">
+              <option value="SHA1">SHA-1</option>
+              <option value="SHA256">SHA-256</option>
+              <option value="SHA512">SHA-512</option>
+            </select>
+          </label>
+          <label>
+            <span>桁数</span>
+            <select id="editDigitsInput">
+              <option value="6">6桁</option>
+              <option value="7">7桁</option>
+              <option value="8">8桁</option>
+            </select>
+          </label>
+          <label>
+            <span>更新間隔</span>
+            <select id="editPeriodInput">
+              <option value="30">30秒</option>
+              <option value="60">60秒</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint">アルゴリズム・桁数・更新間隔は、サービス側の指定と違うと、正しい認証コードが出なくなります。</p>
+        <button type="submit">保存</button>
+      </form>
+      <p id="editStatus" class="status-line" aria-live="polite"></p>
       </section>
     </dialog>
 

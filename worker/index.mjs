@@ -86,6 +86,9 @@ export default {
       if (deleteMatch && request.method === "DELETE") {
         return deleteAccount(Number(deleteMatch[1]), env, session);
       }
+      if (deleteMatch && request.method === "PATCH") {
+        return updateAccount(Number(deleteMatch[1]), request, env, session);
+      }
       if (url.pathname.startsWith("/api/")) return json({ error: "not_found" }, 404);
 
       return env.ASSETS.fetch(request);
@@ -174,6 +177,64 @@ async function createAccount(request, env, session) {
     .run();
 
   return json({ id: result.meta.last_row_id }, 201);
+}
+
+// シードを空で送ったときは、今のシードをそのまま使う
+async function updateAccount(id, request, env, session) {
+  if (!canAddSecrets(session.id, env)) return json({ error: "forbidden" }, 403);
+
+  const current = await env.DB.prepare(
+    "SELECT encrypted_secret, iv FROM totp_accounts WHERE id = ? AND deleted_at IS NULL",
+  )
+    .bind(id)
+    .first();
+  if (!current) return json({ error: "not_found" }, 404);
+
+  const body = await request.json();
+  const serviceName = String(body.service || "").trim();
+  const accountName = String(body.account || "").trim();
+  const roleName = String(body.role || "").trim();
+  if (!serviceName || !accountName) return json({ error: "missing_required_fields" }, 400);
+
+  let secret;
+  let otp;
+  try {
+    const parsed = parseSecretInput(String(body.secret || ""), body);
+    otp = parsed.secret ? parsed.otp : normalizeOtpParams(body, { strict: true });
+    secret = parsed.secret || null;
+  } catch (error) {
+    return json({ error: "invalid_otp_parameters" }, 400);
+  }
+
+  try {
+    await generateTotp(secret || (await decryptSecret(current.encrypted_secret, current.iv, env)), Date.now(), otp);
+  } catch (error) {
+    return json({ error: "invalid_secret" }, 400);
+  }
+  const encrypted = secret ? await encryptSecret(secret, env) : { ciphertext: current.encrypted_secret, iv: current.iv };
+
+  await env.DB.prepare(
+    `UPDATE totp_accounts
+        SET service_name = ?, account_name = ?, role_name = ?,
+            encrypted_secret = ?, iv = ?, algorithm = ?, digits = ?, period = ?,
+            updated_by_discord_id = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND deleted_at IS NULL`,
+  )
+    .bind(
+      serviceName,
+      accountName,
+      roleName || null,
+      encrypted.ciphertext,
+      encrypted.iv,
+      otp.algorithm,
+      otp.digits,
+      otp.period,
+      session.id,
+      id,
+    )
+    .run();
+
+  return json({ ok: true });
 }
 
 async function deleteAccount(id, env, session) {

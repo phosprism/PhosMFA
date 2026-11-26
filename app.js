@@ -7,7 +7,7 @@ const CACHE_KEY_ID = "account-cache-key-v1";
 const CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v2");
 const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
 const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
-const SERVICE_WORKER_CACHE = "phos-mfa-v25";
+const SERVICE_WORKER_CACHE = "phos-mfa-v26";
 // 開いたときのロックが有効な人のオフライン用キャッシュ (v3)。サーバーからもらう鍵 K で暗号化し、
 // K はパスコードから PBKDF2 で作った鍵で包んで保存する。パスコードを知らないと開けない。
 const OFFLINE_WRAP_KEY = "phos-mfa.offline-wrap.v1";
@@ -20,6 +20,7 @@ const UNLOCK_HEADER = "X-PhosMFA-Unlock";
 const state = {
   accounts: [],
   selectedId: "",
+  editingId: 0,
   canAddSecrets: false,
   cameraStream: null,
   qrFrameId: 0,
@@ -65,6 +66,17 @@ const els = {
   selectedPeriod: document.querySelector("#selectedPeriod"),
   copyTokenButton: document.querySelector("#copyTokenButton"),
   deleteButton: document.querySelector("#deleteButton"),
+  editButton: document.querySelector("#editButton"),
+  editDialog: document.querySelector("#editDialog"),
+  editForm: document.querySelector("#editForm"),
+  editServiceInput: document.querySelector("#editServiceInput"),
+  editAccountInput: document.querySelector("#editAccountInput"),
+  editRoleInput: document.querySelector("#editRoleInput"),
+  editSecretInput: document.querySelector("#editSecretInput"),
+  editAlgorithmInput: document.querySelector("#editAlgorithmInput"),
+  editDigitsInput: document.querySelector("#editDigitsInput"),
+  editPeriodInput: document.querySelector("#editPeriodInput"),
+  editStatus: document.querySelector("#editStatus"),
   timeLeft: document.querySelector("#timeLeft"),
   currentTime: document.querySelector("#currentTime"),
   syncStatus: document.querySelector("#syncStatus"),
@@ -157,7 +169,7 @@ els.adminOrderResetButton.addEventListener("click", () => {
 els.unlockOnOpenToggle.addEventListener("change", updateUnlockOnOpen);
 els.addPasskeyButton.addEventListener("click", addPasskeyFromSettings);
 els.passcodeChangeForm.addEventListener("submit", changePasscodeFromSettings);
-for (const dialog of [els.settingsDialog, els.adminDialog]) {
+for (const dialog of [els.settingsDialog, els.adminDialog, els.editDialog]) {
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog || event.target.closest("[data-close]")) dialog.close();
   });
@@ -226,6 +238,19 @@ els.copyTokenButton.addEventListener("click", async () => {
   window.setTimeout(() => {
     els.copyTokenButton.querySelector("small").textContent = "クリックしてコピー";
   }, 1400);
+});
+
+els.editButton.addEventListener("click", openEditDialog);
+els.editForm.addEventListener("submit", saveEdit);
+els.editSecretInput.addEventListener("input", () => {
+  const value = els.editSecretInput.value.trim();
+  if (!value.startsWith("otpauth://")) return;
+  try {
+    setEditOtpParams(parseOtpAuth(value));
+    els.editStatus.textContent = "";
+  } catch (error) {
+    els.editStatus.textContent = error.message;
+  }
 });
 
 els.deleteButton.addEventListener("click", async () => {
@@ -621,9 +646,80 @@ function base64ToBytes(value) {
   return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
 }
 
+function setSelectValue(select, value, label) {
+  if (![...select.options].some((option) => option.value === String(value))) {
+    select.append(new Option(label, String(value)));
+  }
+  select.value = String(value);
+}
+
+function setEditOtpParams({ algorithm, digits, period }) {
+  setSelectValue(els.editAlgorithmInput, algorithm, algorithm);
+  setSelectValue(els.editDigitsInput, digits, `${digits}桁`);
+  setSelectValue(els.editPeriodInput, period, `${period}秒`);
+}
+
+function openEditDialog() {
+  const selected = currentAccount();
+  if (!selected || !state.canAddSecrets || state.offlineMode) return;
+  state.editingId = selected.id;
+  els.editForm.reset();
+  els.editServiceInput.value = selected.service;
+  els.editAccountInput.value = selected.account;
+  els.editRoleInput.value = selected.role === "未分類" ? "" : selected.role;
+  setEditOtpParams(selected);
+  els.editStatus.textContent = "";
+  els.editDialog.showModal();
+}
+
+async function saveEdit(event) {
+  event.preventDefault();
+  if (state.offlineMode) {
+    els.editStatus.textContent = "オフライン中は保存できません。オンラインに戻ってから保存してください。";
+    return;
+  }
+  const payload = {
+    service: els.editServiceInput.value.trim(),
+    account: els.editAccountInput.value.trim(),
+    role: els.editRoleInput.value.trim(),
+    secret: els.editSecretInput.value.trim(),
+    algorithm: els.editAlgorithmInput.value,
+    digits: Number(els.editDigitsInput.value),
+    period: Number(els.editPeriodInput.value),
+  };
+  if (!payload.service || !payload.account) {
+    els.editStatus.textContent = "サービス名とアカウントを入力してください。";
+    return;
+  }
+
+  const submit = els.editForm.querySelector("button[type=submit]");
+  submit.disabled = true;
+  try {
+    const { response, data } = await api(`/api/accounts/${state.editingId}`, { method: "PATCH", body: payload });
+    if (await handleAccessError(response, data)) {
+      els.editDialog.close();
+      return;
+    }
+    if (!response.ok) {
+      els.editStatus.textContent =
+        data?.error === "invalid_secret" || data?.error === "invalid_otp_parameters"
+          ? "シード、またはアルゴリズム・桁数・更新間隔が正しくありません。入力内容を確認してください。"
+          : data?.error === "not_found"
+            ? "このアカウントは削除されています。"
+            : "保存できませんでした。";
+      return;
+    }
+    els.editDialog.close();
+    await loadAccounts({ showError: true });
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 function updatePermissionUi() {
   els.addPanel.classList.toggle("hidden", !state.canAddSecrets || state.offlineMode);
   els.deleteButton.classList.toggle("hidden", !state.canAddSecrets || state.offlineMode);
+  els.editButton.classList.toggle("hidden", !state.canAddSecrets || state.offlineMode);
 }
 
 function applyServerTime(serverTime) {
@@ -2496,7 +2592,7 @@ function formatDate(value) {
 // パスコード画面の表示に合わせて、後ろのページのスクロールを止める
 // ダイアログ (設定・管理) を開いている間も、後ろの画面のスクロールを止める
 function syncGateScrollLock() {
-  const dialogs = [els.settingsDialog, els.adminDialog];
+  const dialogs = [els.settingsDialog, els.adminDialog, els.editDialog];
   const update = () => {
     document.documentElement.classList.toggle("gate-open", !els.gate.classList.contains("hidden"));
     document.documentElement.classList.toggle("modal-open", dialogs.some((dialog) => dialog.open));
