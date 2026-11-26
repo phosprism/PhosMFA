@@ -7,7 +7,7 @@ const CACHE_KEY_ID = "account-cache-key-v1";
 const CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v2");
 const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
 const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
-const SERVICE_WORKER_CACHE = "phos-mfa-v21";
+const SERVICE_WORKER_CACHE = "phos-mfa-v22";
 // 開いたときのロックが有効な人のオフライン用キャッシュ (v3)。サーバーからもらう鍵 K で暗号化し、
 // K はパスコードから PBKDF2 で作った鍵で包んで保存する。パスコードを知らないと開けない。
 const OFFLINE_WRAP_KEY = "phos-mfa.offline-wrap.v1";
@@ -39,6 +39,7 @@ const state = {
   pendingPasscodeTimer: 0,
   gatePromise: null,
   passkeyOfferDone: false,
+  autoPasskeyTried: false,
   // 管理画面: サーバーにある並び順 (adminAccounts) と、編集中の並び順 (adminOrder)
   adminAccounts: [],
   adminOrder: [],
@@ -1200,10 +1201,12 @@ function renderVerifyStage(security) {
         ? {
             label: "パスキー",
             ariaLabel: "パスキーで本人確認",
-            onPress: async () => {
+            onPress: async ({ auto = false } = {}) => {
               setGateError("");
               const result = await authenticateWithPasskey();
               if (result.ok || result.locked) return resolve();
+              // 自動で出したパスキーの画面を閉じただけなら、エラーは出さずにパスコード入力へ
+              if (auto && result.cancelled) return;
               if (result.message) setGateError(result.message);
               if (Number.isFinite(result.remainingAttempts)) showRemaining(result.remainingAttempts);
             },
@@ -1229,7 +1232,21 @@ function renderVerifyStage(security) {
     });
 
     els.gateBody.replaceChildren(pad.element, remaining);
+
+    // スマホのPWAで開いたときは、すぐにパスキーの確認を出す (起動ごとに1回だけ)
+    if (canUsePasskey && shouldAutoStartPasskey()) {
+      state.autoPasskeyTried = true;
+      pad.pressExtra({ auto: true });
+    }
   });
+}
+
+function isStandalonePwa() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+
+function shouldAutoStartPasskey() {
+  return !state.autoPasskeyTried && isStandalonePwa() && !usesKeyboardEntry();
 }
 
 function acceptVerification(data, passcode = "") {
@@ -1357,16 +1374,7 @@ function passcodeField({ length, onComplete, extraKey = null }) {
   let extraButton = null;
   if (extraKey) {
     extraButton = button(extraKey.ariaLabel || extraKey.label, "button", "secondary");
-    extraButton.addEventListener("click", async () => {
-      if (busy) return;
-      setBusy(true);
-      try {
-        await extraKey.onPress();
-      } finally {
-        setBusy(false);
-        focusInput();
-      }
-    });
+    extraButton.addEventListener("click", () => runExtra());
     actions.append(extraButton);
   }
 
@@ -1443,7 +1451,20 @@ function passcodeField({ length, onComplete, extraKey = null }) {
     focusInput();
   }
 
-  const controller = { element, destroy() {} };
+  async function runExtra(options = {}) {
+    if (busy || !extraKey) return;
+    setBusy(true);
+    try {
+      await extraKey.onPress(options);
+    } finally {
+      if (activePad === controller) {
+        setBusy(false);
+        focusInput();
+      }
+    }
+  }
+
+  const controller = { element, pressExtra: runExtra, destroy() {} };
   activePad = controller;
   render();
   // 画面に入ったらすぐ打てるようにする
@@ -1492,15 +1513,7 @@ function passcodeKeypad({ length, onComplete, extraKey = null }) {
   } else if (extraKey) {
     const key = button(extraKey.label, "button", "pin-key text");
     key.setAttribute("aria-label", extraKey.ariaLabel || extraKey.label);
-    key.addEventListener("click", async () => {
-      if (busy) return;
-      setBusy(true);
-      try {
-        await extraKey.onPress();
-      } finally {
-        setBusy(false);
-      }
-    });
+    key.addEventListener("click", () => runExtra());
     keys.append(key);
   } else {
     keys.append(Object.assign(document.createElement("span"), { className: "pin-key blank" }));
@@ -1580,8 +1593,19 @@ function passcodeKeypad({ length, onComplete, extraKey = null }) {
   };
   document.addEventListener("keydown", onKeyDown);
 
+  async function runExtra(options = {}) {
+    if (busy || !extraKey) return;
+    setBusy(true);
+    try {
+      await extraKey.onPress(options);
+    } finally {
+      if (activePad === controller) setBusy(false);
+    }
+  }
+
   const controller = {
     element,
+    pressExtra: runExtra,
     destroy() {
       document.removeEventListener("keydown", onKeyDown);
     },
@@ -1712,7 +1736,7 @@ async function authenticateWithPasskey() {
       },
     });
   } catch (error) {
-    return { ok: false, message: passkeyErrorMessage(error) };
+    return { ok: false, cancelled: error?.name === "NotAllowedError", message: passkeyErrorMessage(error) };
   }
   if (!assertion) return { ok: false, message: "パスキーを確認できませんでした。" };
 
