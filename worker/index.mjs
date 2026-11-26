@@ -34,12 +34,21 @@ import {
   upsertUserOnLogin,
 } from "./security.mjs";
 const COOKIE_OAUTH_STATE = "mfa_oauth_state";
+// ブラウザや iPhone がページの指定なしに探しに来るアイコン
+const WELL_KNOWN_ICONS = {
+  "/favicon.ico": "/icons/favicon.ico",
+  "/apple-touch-icon.png": "/icons/apple-touch-icon.png",
+  "/apple-touch-icon-precomposed.png": "/icons/apple-touch-icon.png",
+};
 const OAUTH_STATE_MAX_AGE_SECONDS = 60 * 10;
 
 export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
+
+      const wellKnownIcon = WELL_KNOWN_ICONS[url.pathname];
+      if (wellKnownIcon) return env.ASSETS.fetch(new Request(new URL(wellKnownIcon, url.origin), request));
 
       if (url.pathname === "/login") return renderLogin(request, env);
       if (url.pathname === "/auth/discord") return redirectToDiscord(request, env);
@@ -201,7 +210,14 @@ function renderLoginPage() {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#0f1b31">
+    <link rel="icon" href="/icons/favicon.ico" sizes="any">
+    <link rel="icon" href="/icons/favicon-32.png" type="image/png" sizes="32x32">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
     <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="apple-mobile-web-app-title" content="PhosMFA">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>Discordログイン - PhosMFA</title>
     <style>
       body { align-items: center; background: #f5f7fb; color: #172033; display: flex; font-family: system-ui, sans-serif; min-height: 100vh; margin: 0; padding: 24px; }

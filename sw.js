@@ -1,4 +1,4 @@
-const CACHE_NAME = "phos-mfa-v22";
+const CACHE_NAME = "phos-mfa-v23";
 const APP_SHELL = [
   "/index.html",
   "/styles.css",
@@ -7,6 +7,10 @@ const APP_SHELL = [
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
+  "/icons/icon-maskable-192.png",
+  "/icons/icon-maskable-512.png",
+  "/icons/apple-touch-icon.png",
+  "/icons/favicon-32.png",
 ];
 
 self.addEventListener("install", (event) => {
