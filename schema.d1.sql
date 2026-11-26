@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS totp_accounts (
   algorithm TEXT NOT NULL DEFAULT 'SHA1',
   digits INTEGER NOT NULL DEFAULT 6,
   period INTEGER NOT NULL DEFAULT 30,
+  sort_order INTEGER NOT NULL DEFAULT 0,
   created_by_discord_id TEXT NOT NULL,
   updated_by_discord_id TEXT,
   deleted_at TEXT,
@@ -71,3 +72,14 @@ CREATE TABLE IF NOT EXISTS security_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_security_events_user ON security_events (discord_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_totp_accounts_sort_order ON totp_accounts (sort_order);
+
+CREATE TABLE IF NOT EXISTS account_visibility (
+  discord_id TEXT NOT NULL,
+  account_id INTEGER NOT NULL,
+  hidden INTEGER NOT NULL DEFAULT 1,
+  updated_by_discord_id TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (discord_id, account_id)
+);

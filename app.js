@@ -7,7 +7,7 @@ const CACHE_KEY_ID = "account-cache-key-v1";
 const CACHE_AAD = new TextEncoder().encode("phos-mfa.accounts.v2");
 const OTP_HASHES = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
 const OTP_DEFAULTS = { algorithm: "SHA1", digits: 6, period: 30 };
-const SERVICE_WORKER_CACHE = "phos-mfa-v15";
+const SERVICE_WORKER_CACHE = "phos-mfa-v16";
 // 開いたときのロックが有効な人のオフライン用キャッシュ (v3)。サーバーからもらう鍵 K で暗号化し、
 // K はパスコードから PBKDF2 で作った鍵で包んで保存する。パスコードを知らないと開けない。
 const OFFLINE_WRAP_KEY = "phos-mfa.offline-wrap.v1";
@@ -39,6 +39,9 @@ const state = {
   pendingPasscodeTimer: 0,
   gatePromise: null,
   passkeyOfferDone: false,
+  // 管理画面: サーバーにある並び順 (adminAccounts) と、編集中の並び順 (adminOrder)
+  adminAccounts: [],
+  adminOrder: [],
 };
 
 const els = {
@@ -107,6 +110,14 @@ const els = {
   adminReloadButton: document.querySelector("#adminReloadButton"),
   adminStatus: document.querySelector("#adminStatus"),
   adminUserList: document.querySelector("#adminUserList"),
+  adminUsersTab: document.querySelector("#adminUsersTab"),
+  adminOrderTab: document.querySelector("#adminOrderTab"),
+  adminUsersPanel: document.querySelector("#adminUsersPanel"),
+  adminOrderPanel: document.querySelector("#adminOrderPanel"),
+  adminOrderStatus: document.querySelector("#adminOrderStatus"),
+  adminOrderList: document.querySelector("#adminOrderList"),
+  adminOrderSaveButton: document.querySelector("#adminOrderSaveButton"),
+  adminOrderResetButton: document.querySelector("#adminOrderResetButton"),
 };
 
 registerServiceWorker();
@@ -124,7 +135,23 @@ els.gateLogout.addEventListener("click", async (event) => {
 });
 els.settingsButton.addEventListener("click", openSettings);
 els.adminButton.addEventListener("click", openAdmin);
-els.adminReloadButton.addEventListener("click", loadAdminUsers);
+els.adminReloadButton.addEventListener("click", reloadAdmin);
+els.adminUsersTab.addEventListener("click", () => selectAdminTab("users"));
+els.adminOrderTab.addEventListener("click", () => selectAdminTab("order"));
+for (const tab of [els.adminUsersTab, els.adminOrderTab]) {
+  tab.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const next = tab === els.adminUsersTab ? "order" : "users";
+    selectAdminTab(next);
+    (next === "users" ? els.adminUsersTab : els.adminOrderTab).focus();
+  });
+}
+els.adminOrderSaveButton.addEventListener("click", saveAccountOrder);
+els.adminOrderResetButton.addEventListener("click", () => {
+  state.adminOrder = [...state.adminAccounts];
+  renderAccountOrder();
+});
 els.unlockOnOpenToggle.addEventListener("change", updateUnlockOnOpen);
 els.addPasskeyButton.addEventListener("click", addPasskeyFromSettings);
 els.passcodeChangeForm.addEventListener("submit", changePasscodeFromSettings);
@@ -1891,6 +1918,8 @@ const EVENT_LABELS = {
   admin_unlock: "管理者がロックを解除",
   admin_lock: "管理者がロック",
   admin_reset: "管理者が2段階認証をリセット",
+  admin_visibility: "管理者が、表示するアカウントを変更",
+  admin_reorder: "管理者がアカウントの並び順を変更",
 };
 
 async function openAdmin() {
@@ -1898,8 +1927,182 @@ async function openAdmin() {
     alert("オフライン中は管理画面を使えません。");
     return;
   }
+  selectAdminTab("users");
   els.adminDialog.showModal();
+  await reloadAdmin();
+}
+
+async function reloadAdmin() {
+  // 利用者ごとの表示設定でアカウント一覧を使うので、先に読む
+  await loadAdminAccounts();
   await loadAdminUsers();
+}
+
+function selectAdminTab(name) {
+  const users = name === "users";
+  els.adminUsersTab.setAttribute("aria-selected", String(users));
+  els.adminOrderTab.setAttribute("aria-selected", String(!users));
+  els.adminUsersTab.tabIndex = users ? 0 : -1;
+  els.adminOrderTab.tabIndex = users ? -1 : 0;
+  els.adminUsersPanel.hidden = !users;
+  els.adminOrderPanel.hidden = users;
+}
+
+async function loadAdminAccounts() {
+  const { response, data } = await api("/api/admin/accounts");
+  if (await handleSettingsAccessError(response, data)) return;
+  if (!response.ok) {
+    setStatus(els.adminOrderStatus, "アカウントを読み込めませんでした。", true);
+    return;
+  }
+  state.adminAccounts = data.accounts;
+  state.adminOrder = [...data.accounts];
+  setStatus(els.adminOrderStatus, data.accounts.length ? "" : "アカウントがまだありません。");
+  renderAccountOrder();
+}
+
+function orderChanged() {
+  return state.adminOrder.some((account, index) => account.id !== state.adminAccounts[index]?.id);
+}
+
+function renderAccountOrder(focus = null) {
+  const items = state.adminOrder.map((account, index) => {
+    const item = document.createElement("li");
+    if (account.id !== state.adminAccounts[index]?.id) item.classList.add("moved");
+
+    const name = document.createElement("div");
+    name.className = "order-name";
+    const title = document.createElement("strong");
+    title.textContent = account.service;
+    const sub = document.createElement("small");
+    sub.textContent = `${account.account}・${account.role}`;
+    name.append(title, sub);
+
+    const buttons = document.createElement("div");
+    buttons.className = "order-buttons";
+    const move = (label, direction) => {
+      const control = button(label, "button", "secondary");
+      control.setAttribute("aria-label", `${account.service} ${account.account} を${direction < 0 ? "上" : "下"}へ`);
+      control.dataset.id = String(account.id);
+      control.dataset.direction = String(direction);
+      control.disabled = direction < 0 ? index === 0 : index === state.adminOrder.length - 1;
+      control.addEventListener("click", () => moveAccount(index, direction));
+      return control;
+    };
+    buttons.append(move("上へ", -1), move("下へ", 1));
+    item.append(name, buttons);
+    return item;
+  });
+  els.adminOrderList.replaceChildren(...items);
+
+  const changed = orderChanged();
+  els.adminOrderSaveButton.disabled = !changed;
+  els.adminOrderResetButton.disabled = !changed;
+
+  // 動かしたあとも同じボタンにフォーカスを置き、続けて押せるようにする
+  if (focus) {
+    const target =
+      els.adminOrderList.querySelector(`button[data-id="${focus.id}"][data-direction="${focus.direction}"]:not(:disabled)`) ||
+      els.adminOrderList.querySelector(`button[data-id="${focus.id}"]:not(:disabled)`);
+    target?.focus();
+  }
+}
+
+function moveAccount(index, direction) {
+  const target = index + direction;
+  if (target < 0 || target >= state.adminOrder.length) return;
+  const order = [...state.adminOrder];
+  [order[index], order[target]] = [order[target], order[index]];
+  state.adminOrder = order;
+  setStatus(els.adminOrderStatus, "");
+  renderAccountOrder({ id: order[target].id, direction });
+}
+
+async function saveAccountOrder() {
+  els.adminOrderSaveButton.disabled = true;
+  const ids = state.adminOrder.map((account) => account.id);
+  const { response, data } = await api("/api/admin/accounts/order", { method: "POST", body: { ids } });
+  if (await handleSettingsAccessError(response, data)) return;
+  if (response.status === 409) {
+    await loadAdminAccounts();
+    setStatus(els.adminOrderStatus, "ほかの人がアカウントを追加・削除したため、保存できませんでした。最新の一覧を読み込んだので、もう一度並べ替えてください。", true);
+    return;
+  }
+  if (!response.ok) {
+    setStatus(els.adminOrderStatus, "保存できませんでした。", true);
+    els.adminOrderSaveButton.disabled = false;
+    return;
+  }
+  state.adminAccounts = [...state.adminOrder];
+  renderAccountOrder();
+  setStatus(els.adminOrderStatus, "並び順を保存しました。全員の一覧に反映されます。");
+  // 自分の一覧もすぐ読み直す
+  state.lastSyncAt = 0;
+}
+
+function renderVisibilityEditor(user, container, onSaved) {
+  const list = document.createElement("div");
+  list.className = "visibility-list";
+  const status = document.createElement("p");
+  status.className = "status-line";
+  status.setAttribute("aria-live", "polite");
+  container.append(list);
+
+  (async () => {
+    setStatus(status, "読み込んでいます…");
+    const { response, data } = await api(`/api/admin/users/${user.id}/visibility`);
+    if (await handleSettingsAccessError(response, data)) return;
+    if (!response.ok) {
+      setStatus(status, "読み込めませんでした。", true);
+      container.append(status);
+      return;
+    }
+    setStatus(status, "");
+    if (!state.adminAccounts.length) {
+      list.append(hint("アカウントがまだありません。"));
+      return;
+    }
+
+    const hidden = new Set(data.hiddenAccountIds);
+    const checkboxes = state.adminAccounts.map((account) => {
+      const label = document.createElement("label");
+      label.className = "check-row";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = !hidden.has(account.id);
+      input.value = String(account.id);
+      const text = document.createElement("span");
+      text.textContent = account.service;
+      const sub = document.createElement("small");
+      sub.textContent = account.account;
+      text.append(sub);
+      label.append(input, text);
+      list.append(label);
+      return input;
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "visibility-actions";
+    const all = button("すべて表示", "button", "link-button");
+    all.addEventListener("click", () => checkboxes.forEach((input) => (input.checked = true)));
+    const save = button("保存", "button", "small-button");
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      const hiddenAccountIds = checkboxes.filter((input) => !input.checked).map((input) => Number(input.value));
+      const result = await api(`/api/admin/users/${user.id}/visibility`, { method: "POST", body: { hiddenAccountIds } });
+      save.disabled = false;
+      if (await handleSettingsAccessError(result.response, result.data)) return;
+      if (!result.response.ok) {
+        setStatus(status, "保存できませんでした。", true);
+        return;
+      }
+      setStatus(status, hiddenAccountIds.length ? `保存しました。${hiddenAccountIds.length}件を非表示にしています。` : "保存しました。すべて表示しています。");
+      onSaved(hiddenAccountIds.length);
+      if (user.id === state.me?.user?.id) state.lastSyncAt = 0;
+    });
+    actions.append(save, all, status);
+    container.append(actions);
+  })();
 }
 
 async function loadAdminUsers() {
@@ -1958,6 +2161,9 @@ function renderAdminUser(user) {
   addFact("最終確認", user.lastVerifiedAt ? formatDate(user.lastVerifiedAt) : "-");
   addFact("連続失敗", `${user.failedAttempts}回${user.lastFailedAt ? `（最後 ${formatDate(user.lastFailedAt)}）` : ""}`);
   if (user.lockedAt) addFact("ロック日時", formatDate(user.lockedAt));
+  const visibilityText = (count) => (count ? `${count}件を非表示` : "すべて");
+  addFact("表示するアカウント", visibilityText(user.hiddenAccountCount));
+  const visibilityFact = facts.lastElementChild.querySelector("dd");
 
   const actions = document.createElement("div");
   actions.className = "admin-actions";
@@ -1999,6 +2205,19 @@ function renderAdminUser(user) {
     );
   }
 
+  const visibility = document.createElement("details");
+  visibility.className = "admin-events";
+  const visibilitySummary = document.createElement("summary");
+  visibilitySummary.textContent = "表示するアカウント";
+  visibility.append(visibilitySummary);
+  visibility.addEventListener("toggle", () => {
+    if (!visibility.open || visibility.dataset.loaded) return;
+    visibility.dataset.loaded = "1";
+    renderVisibilityEditor(user, visibility, (count) => {
+      visibilityFact.textContent = visibilityText(count);
+    });
+  });
+
   const events = document.createElement("details");
   events.className = "admin-events";
   const summary = document.createElement("summary");
@@ -2028,7 +2247,7 @@ function renderAdminUser(user) {
     }
   });
 
-  card.append(head, facts, actions, events);
+  card.append(head, facts, actions, visibility, events);
   return card;
 }
 
@@ -2046,6 +2265,7 @@ function eventDetailLabel(detail) {
   if (!detail) return "";
   if (EVENT_DETAIL_LABELS[detail]) return EVENT_DETAIL_LABELS[detail];
   if (/^\d+\/\d+$/.test(detail)) return `${detail.split("/")[0]}回目`;
+  if (/^\d+$/.test(detail)) return `${detail}件を非表示`;
   if (/^[a-z_]+$/.test(detail)) return "検証エラー";
   return detail;
 }

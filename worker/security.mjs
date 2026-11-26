@@ -497,6 +497,12 @@ export async function handleAdminApi(request, env, session, user, path) {
   if (!canAddSecrets(user.discord_id, env)) return json({ error: "forbidden" }, 403);
 
   if (path === "/users" && request.method === "GET") return adminListUsers(env);
+  if (path === "/accounts" && request.method === "GET") return adminListAccounts(env);
+  if (path === "/accounts/order" && request.method === "POST") return adminSaveOrder(request, env, user);
+
+  const visibilityMatch = path.match(/^\/users\/(\d{1,25})\/visibility$/);
+  if (visibilityMatch && request.method === "GET") return adminGetVisibility(env, visibilityMatch[1]);
+  if (visibilityMatch && request.method === "POST") return adminSaveVisibility(request, env, user, visibilityMatch[1]);
 
   const eventsMatch = path.match(/^\/users\/(\d{1,25})\/events$/);
   if (eventsMatch && request.method === "GET") return adminUserEvents(env, eventsMatch[1]);
@@ -552,7 +558,10 @@ async function adminListUsers(env) {
     `SELECT u.discord_id, u.username, u.global_name, u.passcode_hash IS NOT NULL AS has_passcode,
             u.unlock_on_open, u.failed_attempts, u.locked_at, u.lock_reason, u.locked_by_discord_id,
             u.last_login_at, u.last_verified_at, u.last_failed_at, u.created_at,
-            (SELECT COUNT(*) FROM passkeys p WHERE p.discord_id = u.discord_id) AS passkey_count
+            (SELECT COUNT(*) FROM passkeys p WHERE p.discord_id = u.discord_id) AS passkey_count,
+            (SELECT COUNT(*) FROM account_visibility v
+               JOIN totp_accounts a ON a.id = v.account_id AND a.deleted_at IS NULL
+              WHERE v.discord_id = u.discord_id AND v.hidden = 1) AS hidden_count
        FROM app_users u
       ORDER BY (u.locked_at IS NULL) ASC, u.last_login_at DESC`,
   ).all();
@@ -565,6 +574,7 @@ async function adminListUsers(env) {
       globalName: row.global_name,
       hasPasscode: Boolean(row.has_passcode),
       passkeyCount: row.passkey_count,
+      hiddenAccountCount: row.hidden_count,
       unlockOnOpen: row.unlock_on_open === null ? null : row.unlock_on_open === 1,
       failedAttempts: row.failed_attempts,
       lockedAt: row.locked_at,
@@ -577,6 +587,74 @@ async function adminListUsers(env) {
       isAdmin: canAddSecrets(row.discord_id, env),
     })),
   });
+}
+
+// シードは返さない。並び替えと表示設定に必要な情報だけ。
+async function adminListAccounts(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT id, service_name, account_name, role_name, sort_order
+       FROM totp_accounts
+      WHERE deleted_at IS NULL
+      ORDER BY sort_order ASC, service_name ASC, account_name ASC, id ASC`,
+  ).all();
+  return json({
+    accounts: results.map((row) => ({
+      id: row.id,
+      service: row.service_name,
+      account: row.account_name,
+      role: row.role_name || "未分類",
+    })),
+  });
+}
+
+async function adminSaveOrder(request, env, admin) {
+  const body = await readJson(request);
+  const ids = Array.isArray(body.ids) ? body.ids.map(Number) : [];
+  const { results } = await env.DB.prepare("SELECT id FROM totp_accounts WHERE deleted_at IS NULL").all();
+  const current = new Set(results.map((row) => row.id));
+  // 途中で追加・削除されていたら、古い一覧のまま保存しない
+  if (ids.length !== current.size || new Set(ids).size !== ids.length || !ids.every((id) => current.has(id))) {
+    return json({ error: "accounts_changed" }, 409);
+  }
+
+  await env.DB.batch(
+    ids.map((id, index) =>
+      env.DB.prepare("UPDATE totp_accounts SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, id),
+    ),
+  );
+  await logEvent(env, request, admin.discord_id, "admin_reorder", "", admin.discord_id);
+  return json({ ok: true });
+}
+
+async function adminGetVisibility(env, discordId) {
+  if (!(await loadUser(env, discordId))) return json({ error: "not_found" }, 404);
+  const { results } = await env.DB.prepare(
+    "SELECT account_id FROM account_visibility WHERE discord_id = ? AND hidden = 1",
+  )
+    .bind(discordId)
+    .all();
+  return json({ hiddenAccountIds: results.map((row) => row.account_id) });
+}
+
+async function adminSaveVisibility(request, env, admin, discordId) {
+  if (!(await loadUser(env, discordId))) return json({ error: "not_found" }, 404);
+  const body = await readJson(request);
+  const requested = Array.isArray(body.hiddenAccountIds) ? body.hiddenAccountIds.map(Number) : [];
+  const { results } = await env.DB.prepare("SELECT id FROM totp_accounts WHERE deleted_at IS NULL").all();
+  const existing = new Set(results.map((row) => row.id));
+  const hidden = [...new Set(requested)].filter((id) => existing.has(id));
+
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM account_visibility WHERE discord_id = ?").bind(discordId),
+    ...hidden.map((accountId) =>
+      env.DB.prepare(
+        `INSERT INTO account_visibility (discord_id, account_id, hidden, updated_by_discord_id)
+         VALUES (?, ?, 1, ?)`,
+      ).bind(discordId, accountId, admin.discord_id),
+    ),
+  ]);
+  await logEvent(env, request, discordId, "admin_visibility", `${hidden.length}`, admin.discord_id);
+  return json({ ok: true, hiddenAccountIds: hidden });
 }
 
 async function adminUserEvents(env, discordId) {

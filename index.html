@@ -232,9 +232,26 @@
           <button type="button" class="secondary" data-close>閉じる</button>
         </div>
       </div>
-      <p class="hint">PhosMFA にログインしたことのある Discord アカウントです。ロックされたアカウントは、ここで解除するまで使えません。</p>
-      <p id="adminStatus" class="status-line" aria-live="polite"></p>
-      <div id="adminUserList" class="admin-list"></div>
+      <div class="tabs" role="tablist" aria-label="管理する内容">
+        <button id="adminUsersTab" type="button" role="tab" aria-selected="true" aria-controls="adminUsersPanel">利用者</button>
+        <button id="adminOrderTab" type="button" role="tab" aria-selected="false" aria-controls="adminOrderPanel" tabindex="-1">アカウントの並び順</button>
+      </div>
+
+      <section id="adminUsersPanel" role="tabpanel" aria-labelledby="adminUsersTab">
+        <p class="hint">PhosMFA にログインしたことのある Discord アカウントです。ロックされた人は、ここで解除するまで使えません。「表示するアカウント」で、その人に見せる認証コードを選べます。</p>
+        <p id="adminStatus" class="status-line" aria-live="polite"></p>
+        <div id="adminUserList" class="admin-list"></div>
+      </section>
+
+      <section id="adminOrderPanel" role="tabpanel" aria-labelledby="adminOrderTab" hidden>
+        <p class="hint">ここで決めた順番で、全員の一覧にアカウントが並びます。新しく追加したアカウントは最後に並びます。</p>
+        <p id="adminOrderStatus" class="status-line" aria-live="polite"></p>
+        <ol id="adminOrderList" class="order-list"></ol>
+        <div class="order-actions">
+          <button id="adminOrderSaveButton" type="button" disabled>並び順を保存</button>
+          <button id="adminOrderResetButton" type="button" class="secondary" disabled>元に戻す</button>
+        </div>
+      </section>
     </dialog>
 
     <template id="accountTemplate">

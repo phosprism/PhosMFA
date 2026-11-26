@@ -1105,3 +1105,136 @@ button:disabled {
     width: 66px;
   }
 }
+
+/* --- 管理画面のタブ・並び替え・表示設定 --- */
+
+.tabs {
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 4px;
+  padding: 0 20px;
+}
+
+.tabs [role="tab"] {
+  background: none;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  min-height: 44px;
+  padding: 0 12px;
+}
+
+.tabs [role="tab"]:hover {
+  background: none;
+  color: var(--ink);
+}
+
+.tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+[role="tabpanel"] {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+}
+
+[role="tabpanel"][hidden] {
+  display: none;
+}
+
+[role="tabpanel"] > .hint,
+[role="tabpanel"] > .status-line {
+  margin: 0 20px;
+}
+
+.order-list {
+  counter-reset: order;
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0 20px;
+}
+
+.order-list li {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  counter-increment: order;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  padding: 8px 10px;
+}
+
+.order-list li::before {
+  color: var(--muted);
+  content: counter(order);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  text-align: center;
+}
+
+.order-list li.moved {
+  background: #eef5ff;
+  border-color: #9dbff5;
+}
+
+.order-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.order-name strong {
+  display: block;
+}
+
+.order-name small {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.order-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.order-buttons button {
+  font-size: 0.8rem;
+  min-height: 34px;
+  min-width: 44px;
+  padding: 0 8px;
+}
+
+.order-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 20px 20px;
+}
+
+.visibility-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+}
+
+.visibility-list .check-row span small {
+  color: var(--muted);
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.visibility-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 10px;
+}

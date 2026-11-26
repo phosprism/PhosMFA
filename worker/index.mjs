@@ -88,12 +88,19 @@ export default {
 };
 
 async function listAccounts(env, user) {
+  // 管理者が非表示にしたアカウントは、シードごと返さない
   const { results } = await env.DB.prepare(
-    `SELECT id, service_name, account_name, role_name, encrypted_secret, iv, algorithm, digits, period
-       FROM totp_accounts
-      WHERE deleted_at IS NULL
-      ORDER BY service_name ASC, account_name ASC`,
-  ).all();
+    `SELECT a.id, a.service_name, a.account_name, a.role_name, a.encrypted_secret, a.iv, a.algorithm, a.digits, a.period
+       FROM totp_accounts a
+      WHERE a.deleted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM account_visibility v
+           WHERE v.account_id = a.id AND v.discord_id = ? AND v.hidden = 1
+        )
+      ORDER BY a.sort_order ASC, a.service_name ASC, a.account_name ASC, a.id ASC`,
+  )
+    .bind(user.discord_id)
+    .all();
 
   const accounts = [];
   for (const row of results) {
@@ -141,8 +148,8 @@ async function createAccount(request, env, session) {
 
   const result = await env.DB.prepare(
     `INSERT INTO totp_accounts
-      (service_name, account_name, role_name, encrypted_secret, iv, algorithm, digits, period, created_by_discord_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (service_name, account_name, role_name, encrypted_secret, iv, algorithm, digits, period, created_by_discord_id, sort_order)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM totp_accounts))`,
   )
     .bind(
       serviceName,
