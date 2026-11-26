@@ -680,7 +680,7 @@ async function adminUserEvents(env, discordId) {
 // 共通
 // ---------------------------------------------------------------------------
 
-async function logEvent(env, request, discordId, event, detail = "", actorId = null) {
+export async function logEvent(env, request, discordId, event, detail = "", actorId = null) {
   await env.DB.prepare(
     `INSERT INTO security_events (discord_id, event, detail, actor_discord_id, ip, country)
      VALUES (?, ?, ?, ?, ?, ?)`,

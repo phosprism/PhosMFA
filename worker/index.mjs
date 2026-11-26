@@ -33,6 +33,7 @@ import {
   sessionCookie,
   upsertUserOnLogin,
 } from "./security.mjs";
+import { handlePasswordsApi } from "./passwords.mjs";
 const COOKIE_OAUTH_STATE = "mfa_oauth_state";
 // ブラウザや iPhone がページの指定なしに探しに来るアイコン
 const WELL_KNOWN_ICONS = {
@@ -78,6 +79,9 @@ export default {
 
       if (url.pathname.startsWith("/api/admin/")) {
         return handleAdminApi(request, env, session, user, url.pathname.slice("/api/admin".length));
+      }
+      if (url.pathname === "/api/passwords" || url.pathname.startsWith("/api/passwords/")) {
+        return handlePasswordsApi(request, env, session, url.pathname.slice("/api/passwords".length));
       }
       if (url.pathname === "/api/accounts" && request.method === "GET") return listAccounts(env, user);
       if (url.pathname === "/api/accounts" && request.method === "POST") return createAccount(request, env, session);

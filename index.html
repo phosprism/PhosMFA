@@ -43,6 +43,7 @@
             <div class="toolbar-row">
               <button id="settingsButton" type="button" class="secondary">セキュリティ設定</button>
               <button id="adminButton" type="button" class="secondary hidden">利用者の管理</button>
+              <button id="passwordButton" type="button" class="secondary hidden">パスワード管理</button>
             </div>
           </div>
 
@@ -171,6 +172,54 @@
             <button type="submit">暗号化して保存</button>
           </form>
         </section>
+      </section>
+
+      <section class="panel password-view hidden" id="passwordView" aria-labelledby="passwordTitle">
+        <div class="pv-head">
+          <div>
+            <h2 id="passwordTitle">パスワード管理</h2>
+            <p class="hint">テスト中のため、管理者にだけ表示しています。</p>
+          </div>
+          <div class="sheet-actions">
+            <button id="vaultLockButton" type="button" class="secondary hidden">ロック</button>
+            <button id="passwordBackButton" type="button" class="secondary">認証コードに戻る</button>
+          </div>
+        </div>
+        <p id="passwordStatus" class="status-line" aria-live="polite"></p>
+
+        <form id="vaultSetupForm" class="stack pv-narrow hidden">
+          <p class="notice">チームで共有するマスターパスワードを決めてください。ID とパスワードは、マスターパスワードから作った鍵でブラウザの中で暗号化してから保存します。サーバーには暗号化したデータしか送りません。マスターパスワードを忘れると、誰も中身を読めなくなります。</p>
+          <label>
+            <span>マスターパスワード（12文字以上）</span>
+            <input id="vaultNewInput" type="password" autocomplete="new-password" minlength="12" required>
+          </label>
+          <label>
+            <span>マスターパスワード（確認）</span>
+            <input id="vaultConfirmInput" type="password" autocomplete="new-password" minlength="12" required>
+          </label>
+          <button type="submit">この内容で始める</button>
+        </form>
+
+        <form id="vaultUnlockForm" class="stack pv-narrow hidden">
+          <p class="hint">マスターパスワードを入力すると、保存した ID とパスワードを表示します。</p>
+          <label>
+            <span>マスターパスワード</span>
+            <input id="vaultUnlockInput" type="password" autocomplete="current-password" required>
+          </label>
+          <button type="submit">開く</button>
+        </form>
+
+        <div id="vaultContent" class="pv-content hidden">
+          <div class="pv-toolbar">
+            <label class="search">
+              <span>検索</span>
+              <input id="passwordSearchInput" type="search" placeholder="名前、ID、URL">
+            </label>
+            <button id="passwordAddButton" type="button">追加</button>
+          </div>
+          <p id="passwordCount" class="hint"></p>
+          <ul id="passwordList" class="pv-list"></ul>
+        </div>
       </section>
     </main>
 
@@ -315,6 +364,43 @@
         <button type="submit">保存</button>
       </form>
       <p id="editStatus" class="status-line" aria-live="polite"></p>
+      </section>
+    </dialog>
+
+    <dialog id="passwordDialog" class="sheet" aria-labelledby="passwordDialogTitle">
+      <div class="sheet-head">
+        <h2 id="passwordDialogTitle">パスワードを追加</h2>
+        <button type="button" class="secondary" data-close>閉じる</button>
+      </div>
+      <section class="sheet-section">
+        <form id="passwordForm" class="stack compact">
+          <label>
+            <span>名前</span>
+            <input id="pwTitleInput" type="text" placeholder="例: X（公式アカウント）" required>
+          </label>
+          <label>
+            <span>URL</span>
+            <input id="pwUrlInput" type="url" inputmode="url" placeholder="https://">
+          </label>
+          <label>
+            <span>ID</span>
+            <input id="pwUsernameInput" type="text" autocomplete="off" spellcheck="false">
+          </label>
+          <label>
+            <span>パスワード</span>
+            <span class="pw-input-row">
+              <input id="pwPasswordInput" type="password" autocomplete="new-password" spellcheck="false">
+              <button id="pwRevealButton" type="button" class="secondary">表示</button>
+              <button id="pwGenerateButton" type="button" class="secondary">生成</button>
+            </span>
+          </label>
+          <label>
+            <span>メモ</span>
+            <textarea id="pwNoteInput" rows="3"></textarea>
+          </label>
+          <button type="submit">暗号化して保存</button>
+        </form>
+        <p id="passwordDialogStatus" class="status-line" aria-live="polite"></p>
       </section>
     </dialog>
 

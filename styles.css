@@ -1455,3 +1455,193 @@ html.modal-open body {
     to { opacity: 1; }
   }
 }
+
+/* --- パスワード管理 (テスト中・管理者だけ) --- */
+
+html.view-passwords #workspace,
+html.gate-open #passwordView {
+  display: none !important;
+}
+
+.password-view {
+  display: grid;
+  gap: 14px;
+  margin: 0 auto;
+  max-width: 920px;
+  padding: clamp(18px, 4vw, 32px);
+}
+
+.pv-head {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.pv-head h2 {
+  margin: 0 0 4px;
+}
+
+.pv-narrow {
+  margin-top: 0;
+  max-width: 460px;
+}
+
+.pv-content {
+  display: grid;
+  gap: 12px;
+}
+
+.pv-toolbar {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.pv-toolbar > button {
+  padding: 0 22px;
+}
+
+.pv-list {
+  display: grid;
+  gap: 12px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pv-empty {
+  color: var(--muted);
+  padding: 24px 0;
+  text-align: center;
+}
+
+.pv-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.pv-card.broken {
+  background: #fff7f7;
+}
+
+.pv-card.broken p {
+  color: var(--danger);
+  margin: 0;
+}
+
+.pv-card-head {
+  display: grid;
+  gap: 4px;
+}
+
+.pv-card-head h3 {
+  font-size: 1.02rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.pv-card-head a {
+  color: var(--accent);
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+
+.pv-fields {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.pv-field {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 84px minmax(0, 1fr);
+}
+
+.pv-field dt {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.pv-field dd {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin: 0;
+  min-width: 0;
+}
+
+.pv-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pv-field-actions,
+.pv-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.pv-field-actions button,
+.pv-actions button {
+  font-size: 0.82rem;
+  min-height: 32px;
+  padding: 0 12px;
+}
+
+.pv-actions {
+  justify-content: flex-end;
+}
+
+.pv-note {
+  background: #f6f8fb;
+  border-radius: 8px;
+  color: #344054;
+  font-size: 0.88rem;
+  margin: 0;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+
+label .pw-input-row {
+  color: inherit;
+  display: flex;
+  font-size: inherit;
+  font-weight: inherit;
+  gap: 6px;
+}
+
+.pw-input-row input {
+  min-width: 0;
+}
+
+.pw-input-row button {
+  flex-shrink: 0;
+  padding: 0 12px;
+}
+
+@media (max-width: 520px) {
+  .pv-field {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .pv-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .pv-toolbar > button {
+    min-height: 44px;
+  }
+}
