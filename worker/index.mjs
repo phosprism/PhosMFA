@@ -262,7 +262,7 @@ async function handleDiscordCallback(request, env) {
   const guildAllowed = !env.DISCORD_REQUIRED_GUILD_ID || guilds.some((guild) => guild.id === env.DISCORD_REQUIRED_GUILD_ID);
 
   if (!userAllowed || !guildAllowed) {
-    return html("<h1>アクセスできません</h1><p>必要なDiscord権限が確認できませんでした。</p>", 403);
+    return html("<h1>アクセスできません</h1><p>必要な Discord の権限を確認できませんでした。</p>", 403);
   }
 
   // Discord のログインだけでは 2段階認証は未完了 (mfa: false)。パスコードかパスキーの確認で mfa: true になる。
